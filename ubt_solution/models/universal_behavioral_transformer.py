@@ -203,8 +203,7 @@ class UniversalBehavioralTransformer(nn.Module):
         user_embeddings = F.normalize(user_embeddings, p=2, dim=-1)
         
         task_outputs = self.task_encoder(user_embeddings)
-        
-        # price 回归映射已移除，用 price_propensity 多标签分类代替
+
         
         losses = {}
         
@@ -263,16 +262,16 @@ class UniversalBehavioralTransformer(nn.Module):
             product_loss = torch.tensor(0.0, device=device)
         losses['product_loss'] = product_loss
         # 价格回归损失（MSE），仅对有标签样本计算
-        price_pred = task_outputs['price']  # 预测值，形状 [B]
-        price_target = batch['price_target']
-        has_mask = batch['has_price_target']
-        mask = has_mask > 0.5
-        if mask.any():
-            price_loss = F.mse_loss(price_pred[mask], price_target[mask])
-        else:
-            price_loss = torch.tensor(0.0, device=device)
-        losses['price_loss'] = price_loss
-        weighted_price = self.price_weight * price_loss
+        # price_pred = task_outputs['price']  # 预测值，形状 [B]
+        # price_target = batch['price_target']
+        # has_mask = batch['has_price_target']
+        # mask = has_mask > 0.5
+        # if mask.any():
+        #     price_loss = F.mse_loss(price_pred[mask], price_target[mask])
+        # else:
+        #     price_loss = torch.tensor(0.0, device=device)
+        # losses['price_loss'] = price_loss
+
         # 加入各任务的加权损失
         cw, catw, pw = self.task_weights
         weighted_churn = cw * churn_loss
@@ -281,60 +280,10 @@ class UniversalBehavioralTransformer(nn.Module):
         losses['weighted_churn_loss'] = weighted_churn
         losses['weighted_category_loss'] = weighted_category
         losses['weighted_product_loss'] = weighted_product
-        losses['weighted_price_loss'] = weighted_price
-        # 添加：Novelty 损失计算
-        # 类别 Novelty loss：propensity_category_ids/popularity_category 对所有用户相同，取首行
-        cat_ids = batch['propensity_category_ids'][0].to(device)  # [L]
-        pop_cat = batch['popularity_category'][0].to(device)
-        k_cat = min(100, pop_cat.size(0))
-        max_pop_cat = pop_cat.sort(descending=True)[0][:k_cat].sum()
-        pop_cat_norm = pop_cat / (max_pop_cat + 1e-8)
-        cat_embs = self.category_embeddings(cat_ids)
-        cat_embs = F.normalize(cat_embs, p=2, dim=-1)
-        logits_cat_all = user_embeddings @ cat_embs.T / self.temperature
-        probs_cat_all = torch.softmax(logits_cat_all, dim=1)
-        novelty_cat_per_user = (probs_cat_all * pop_cat_norm.unsqueeze(0)).sum(dim=1)
-        novelty_category_loss = novelty_cat_per_user.mean()
-        # 商品 Novelty loss
-        sku_ids = batch['propensity_sku_ids'][0].to(device)
-        pop_sku = batch['popularity_sku'][0].to(device)
-        k_sku = min(100, pop_sku.size(0))
-        max_pop_sku = pop_sku.sort(descending=True)[0][:k_sku].sum()
-        pop_sku_norm = pop_sku / (max_pop_sku + 1e-8)
-        sku_embs = self.sku_embeddings(sku_ids)
-        sku_embs = F.normalize(sku_embs, p=2, dim=-1)
-        logits_sku_all = user_embeddings @ sku_embs.T / self.temperature
-        probs_sku_all = torch.softmax(logits_sku_all, dim=1)
-        novelty_sku_per_user = (probs_sku_all * pop_sku_norm.unsqueeze(0)).sum(dim=1)
-        novelty_product_loss = novelty_sku_per_user.mean()
-        losses['novelty_category_loss'] = novelty_category_loss
-        losses['novelty_product_loss'] = novelty_product_loss
-        # 下一个购买商品名称预测损失
-        # 使用原始 16 维 quantized vector，不再通过 name_embedding
-        pos_name_vec = batch['pos_name'].float()  # (B, name_dim)
-        neg_name_vecs = batch['neg_names'].float()  # (B, num_neg, name_dim)
-        # L2 归一化标签向量
-        pos_name_norm = F.normalize(pos_name_vec, p=2, dim=-1)
-        neg_name_norm = F.normalize(neg_name_vecs, p=2, dim=-1)
-        # 用户映射到 name 空间
-        user_name_pred = self.name_head(user_embeddings)  # (B, name_dim)
-        user_name_norm = F.normalize(user_name_pred, p=2, dim=-1)
-        # 计算相似度得分
-        pos_scores = (user_name_norm * pos_name_norm).sum(-1) / self.temperature  # (B)
-        neg_scores = (neg_name_norm * user_name_norm.unsqueeze(1)).sum(-1) / self.temperature  # (B, num_neg)
-        logits_name = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=-1)  # (B, 1+num_neg)
-        # 交叉熵损失，正样本索引 0
-        targets = torch.zeros(batch_size, dtype=torch.long, device=device)
-        name_loss = F.cross_entropy(logits_name, targets)
-        losses['name_loss'] = name_loss
-        weighted_name_loss = self.name_weight * name_loss
-        losses['weighted_name_loss'] = weighted_name_loss
-        # 将 novelty loss 加入总损失
-        novelty_weight = getattr(self.config, 'novelty_weight', 1.0)
-        total_loss = weighted_churn + weighted_category + weighted_product + weighted_price + novelty_weight * (novelty_category_loss * catw + novelty_product_loss * pw)
-        total_loss = total_loss + weighted_name_loss
+        total_loss = weighted_churn + weighted_category + weighted_product
+        total_loss = total_loss
         losses['loss'] = total_loss * self.loss_scale
-        
+
         return {
             'user_embedding': user_embeddings,
             'temporal_features': temporal_features,

@@ -252,13 +252,10 @@ class BehaviorSequenceDataset(Dataset):
         # 添加：保存候选 category 和 sku 及其流行度，用于 novelty loss
         import torch
         self.propensity_category_ids = torch.from_numpy(self.target_data.propensity_category).long()
-        self.popularity_category        = torch.from_numpy(self.target_data.popularity_category).float()
-        self.propensity_sku_ids         = torch.from_numpy(self.target_data.propensity_sku).long() % self.config.sku_hash_size
-        self.popularity_sku             = torch.from_numpy(self.target_data.popularity_sku).float()
+        self.propensity_sku_ids = torch.from_numpy(self.target_data.propensity_sku).long()
         
         # cache路径加mode前缀
-      
-        
+
         report_memory_usage("数据集初始化完成")
         
     def _build_user_sequences(self, events: Dict[str, List], user_chunk: List[int]) -> Dict[int, List[Dict]]:
@@ -533,6 +530,7 @@ class BehaviorSequenceDataset(Dataset):
             # 处理商品特征
             sku = event.get('sku_id', -1)
             if sku != -1:
+                item_ids[i] = sku
                 if event_code in [EventType.PRODUCT_BUY.value,
                                   EventType.ADD_TO_CART.value,
                                   EventType.REMOVE_FROM_CART.value] and sku != -1:
@@ -679,10 +677,8 @@ class BehaviorSequenceDataset(Dataset):
         }
         # 添加：将 novelty 计算所需数据加入 batch
         result['propensity_category_ids'] = self.propensity_category_ids
-        result['popularity_category']      = self.popularity_category
         result['propensity_sku_ids']      = self.propensity_sku_ids
-        result['popularity_sku']           = self.popularity_sku
-        
+
         # 缓存结果，如果缓存过大则移除最早项
         if len(self.item_cache) >= self.cache_size:
             # 简单策略：随机移除一个项

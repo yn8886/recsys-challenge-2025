@@ -73,7 +73,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task-weights",
         type=str,
-        default=None,
+        default="churn:1.0,category_propensity:0.0,product_propensity:0.0,price:0.0",
         help="Task weights in format 'churn:1.0,category_propensity:0.5,product_propensity:0.5'",
     )
     parser.add_argument(

@@ -15,42 +15,40 @@ class EnhancedFeatureEncoder(nn.Module):
         
         # 事件类型编码
         self.event_embedding = nn.Sequential(
-            nn.Embedding(5, config.hidden_size),
+            nn.Embedding(5 + 2, config.hidden_size),
             nn.LayerNorm(config.hidden_size),
             nn.Dropout(config.dropout)
         )
         
         # 商品特征编码
         self.category_embedding = nn.Sequential(
-            nn.Embedding(config.num_categories + 1, config.hidden_size),
+            nn.Embedding(config.num_categories, config.hidden_size),
             nn.LayerNorm(config.hidden_size),
             nn.Dropout(config.dropout)
         )
         
         self.price_embedding = nn.Sequential(
-            nn.Embedding(101, config.hidden_size),
+            nn.Embedding(102, config.hidden_size),
             nn.LayerNorm(config.hidden_size),
             nn.Dropout(config.dropout)
         )
         
         # 名称和查询编码：EmbeddingBag 平均 16 桶 id
-        self.name_embedding = nn.EmbeddingBag(256, config.hidden_size, mode='mean', padding_idx=0)
-        self.query_embedding = nn.EmbeddingBag(256, config.hidden_size, mode='mean', padding_idx=0)
-        self.name_ln = nn.LayerNorm(config.hidden_size)
-        self.query_ln = nn.LayerNorm(config.hidden_size)
-        self.name_dropout = nn.Dropout(config.dropout)
-        self.query_dropout = nn.Dropout(config.dropout)
+        self.word_embedding = nn.EmbeddingBag(256 + 3, config.hidden_size, mode='mean', padding_idx=0)
+        self.word_ln = nn.LayerNorm(config.hidden_size)
+        self.word_dropout = nn.Dropout(config.dropout)
+
         
-        # 新增：Item ID编码 - 使用哈希映射
+        # 新增：Item ID编码
         self.item_embedding = nn.Sequential(
-            nn.Embedding(config.sku_hash_size, config.item_embedding_dim, padding_idx=0),
+            nn.Embedding(config.num_sku, config.item_embedding_dim, padding_idx=0),
             nn.LayerNorm(config.item_embedding_dim),
             nn.Dropout(config.dropout)
         )
         
-        # 新增：URL编码 - 使用哈希技巧映射到较小的空间
+        # URL编码
         self.url_embedding = nn.Sequential(
-            nn.Embedding(config.url_hash_size, config.url_embedding_dim, padding_idx=0),
+            nn.Embedding(config.num_url, config.url_embedding_dim, padding_idx=0),
             nn.LayerNorm(config.url_embedding_dim),
             nn.Dropout(config.dropout)
         )
@@ -126,36 +124,6 @@ class EnhancedFeatureEncoder(nn.Module):
                 urls: torch.Tensor = None) -> torch.Tensor:  # 新增参数
         batch_size, seq_len, _ = names.shape
         
-        # 确保索引在有效范围内并且没有NaN值
-        event_types = torch.clamp(event_types, 0, 4)
-        categories = torch.clamp(categories, 0, self.config.num_categories)
-        prices = torch.clamp(prices, 0, 100)
-        
-        # 检查并清理NaN值
-        if torch.isnan(names).any():
-            names = torch.where(torch.isnan(names), torch.zeros_like(names), names)
-        if torch.isnan(queries).any():
-            queries = torch.where(torch.isnan(queries), torch.zeros_like(queries), queries)
-        if torch.isnan(timestamps).any():
-            timestamps = torch.where(torch.isnan(timestamps), torch.zeros_like(timestamps), timestamps)
-        
-        # 处理item_ids，确保在有效范围内
-        if item_ids is not None:
-            # 限制在hash空间内
-            item_ids = torch.clamp(item_ids, 0, self.config.sku_hash_size - 1)
-            
-        # 处理urls，进行哈希并确保有效
-        if urls is not None:
-            # 确保没有负值
-            urls = torch.where(urls < 0, torch.zeros_like(urls), urls)
-            # 哈希URL ID
-            hashed_urls = self.hash_url(urls)
-        else:
-            # 如果未提供URLs，使用全零张量
-            hashed_urls = torch.zeros_like(event_types)
-            
-        # 规范化时间戳，无独立线性映射，由相对偏置处理
-        
         # 编码事件类型
         event_emb = self.event_embedding(event_types)
         
@@ -165,19 +133,19 @@ class EnhancedFeatureEncoder(nn.Module):
         
         # 编码名称和查询
         names_ids = names.long().view(-1, 16)
-        name_emb_2d = self.name_embedding(names_ids)
+        name_emb_2d = self.word_embedding(names_ids)
         name_emb = name_emb_2d.view(batch_size, seq_len, self.config.hidden_size)
-        name_emb = self.name_ln(name_emb)
-        name_emb = self.name_dropout(name_emb)
+        name_emb = self.word_ln(name_emb)
+        name_emb = self.word_dropout(name_emb)
         
         # 新增：通过 MLP 提升 name 特征表达
         name_emb = self.name_mlp(name_emb)
         
         queries_ids = queries.long().view(-1, 16)
-        query_emb_2d = self.query_embedding(queries_ids)
+        query_emb_2d = self.word_embedding(queries_ids)
         query_emb = query_emb_2d.view(batch_size, seq_len, self.config.hidden_size)
-        query_emb = self.query_ln(query_emb)
-        query_emb = self.query_dropout(query_emb)
+        query_emb = self.word_ln(query_emb)
+        query_emb = self.word_dropout(query_emb)
         
         # 编码Item ID
         if item_ids is not None:
@@ -188,7 +156,7 @@ class EnhancedFeatureEncoder(nn.Module):
             item_emb = torch.zeros(batch_size, seq_len, self.config.hidden_size, device=event_types.device)
             
         # 编码URL
-        url_emb = self.url_embedding(hashed_urls)
+        url_emb = self.url_embedding(urls)
         url_emb = self.url_projection(url_emb)
         
         # 计算特征重要性 - 添加数值稳定性 - 现在包含Item ID和URL特征

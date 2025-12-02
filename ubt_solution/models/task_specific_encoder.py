@@ -115,7 +115,7 @@ class TaskSpecificEncoder(nn.Module):
         outputs['churn'] = self.task_heads['churn'](shared_features).squeeze(-1)
 
         # 价格回归预测
-        outputs['price'] = self.task_heads['price'](shared_features).squeeze(-1)
+        # outputs['price'] = self.task_heads['price'](shared_features).squeeze(-1)
         
         # 可选：对 churn 输出裁剪以稳定训练
         outputs['churn'] = torch.clamp(outputs['churn'], min=-10.0, max=10.0)

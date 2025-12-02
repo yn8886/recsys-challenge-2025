@@ -25,24 +25,20 @@ class Config:
     time_buckets: int = 128  # 时间桶数量
     
     # 特征维度
-    num_categories: int = 10000
+    num_categories: int = 6995
     num_candidates_categories: int = 100
     num_products: int = 100  # 添加产品数量参数
-    num_behaviors: int = 6  # 购买、加购、移除、页面访问、搜索
+    num_url:int = 373500
+    num_sku:int = 1260370
     name_vector_dim: int = 16
     query_vector_dim: int = 16
     
     # 新增URL和Item ID特征配置
-    url_hash_size: int = 100000  # URL哈希空间大小
     item_embedding_dim: int = 128  # Item ID嵌入维度
     url_embedding_dim: int = 128   # URL嵌入维度
-    max_item_id: int = 2000000    # 最大Item ID数量
-    
-    # 添加：SKU哈希空间大小
-    sku_hash_size: int = 10000    # 将原始SKU映射到此哈希空间
     
     # 行为类型配置
-    max_seq_length: int = 300  # 序列长度
+    max_seq_length: int = 150  # 序列长度
     
     # 训练配置
     batch_size: int = 8192  # 批次大小

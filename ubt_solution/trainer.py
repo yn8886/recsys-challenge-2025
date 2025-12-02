@@ -79,60 +79,16 @@ class UBTTrainer:
             'churn_loss': 0.0,
             'category_loss': 0.0,
             'product_loss': 0.0,
-            'price_loss': 0.0,
-            'novelty_category_loss': 0.0,
-            'novelty_product_loss': 0.0,
         }
         total_samples = 0
         skipped_batches = 0
-        
-        ds = train_loader.dataset
-        available_cats = ds.available_categories_list
+
         for batch_idx, batch in enumerate(tqdm(train_loader, desc="Training")):
             logger.info(f"Batch {batch_idx}: 开始训练")
             try:
                 # 将数据移动到设备
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-                # 动态负采样 - 每个epoch重新采样 neg_cat_ids 和 neg_sku_ids
-                num_neg = self.config.num_negative_samples
-                # 类别负采样
-                prop_cats = batch.get('propensity_category_ids', [])[0].tolist() if 'propensity_category_ids' in batch else []
-                new_neg_cats = []
                 batch_size = batch['client_id'].size(0)
-                for i in range(batch_size):
-                    pos = batch['cats_in_target'][i]
-                    negs = []
-                    # 首先从倾向性列表采样
-                    for cat in prop_cats:
-                        if cat not in pos and len(negs) < num_neg:
-                            negs.append(cat)
-                    # 随机补采样
-                    while len(negs) < num_neg and available_cats:
-                        c = random.choice(available_cats)
-                        if c not in pos and c not in negs:
-                            negs.append(c)
-                    new_neg_cats.append(torch.tensor(negs, dtype=torch.long, device=self.device))
-                batch['neg_cat_ids'] = torch.stack(new_neg_cats, dim=0)
-                # 商品负采样
-                # 使用哈希后的可用 SKU 列表进行采样，防止索引超出范围
-                available_skus = [s % self.config.sku_hash_size for s in ds.available_skus_list]
-                prop_skus = batch.get('propensity_sku_ids', [])[0].tolist() if 'propensity_sku_ids' in batch else []
-                new_neg_skus = []
-                for i in range(batch_size):
-                    pos = batch['skus_in_target'][i]
-                    negs = []
-                    for sku in prop_skus:
-                        if sku not in pos and len(negs) < num_neg:
-                            negs.append(sku)
-                    while len(negs) < num_neg and available_skus:
-                        s = random.choice(available_skus)
-                        if s not in pos and s not in negs:
-                            negs.append(s)
-                    # 对采样到的 SKU 做哈希映射
-                    hashed_negs = [nid % self.config.sku_hash_size for nid in negs]
-                    new_neg_skus.append(torch.tensor(hashed_negs, dtype=torch.long, device=self.device))
-                batch['neg_sku_ids'] = torch.stack(new_neg_skus, dim=0)
-                
                 # 检查输入数据是否有NaN
                 has_nan = False
                 for k, v in batch.items():
@@ -157,7 +113,7 @@ class UBTTrainer:
                 
                 loss = outputs['loss']
                 # 每个batch输出三个任务的损失
-                logger.info(f"batch {batch_idx} losses: churn_loss={outputs['churn_loss'].item():.4f}, category_loss={outputs['category_loss'].item():.4f}, product_loss={outputs['product_loss'].item():.4f}, novelty_category_loss={outputs['novelty_category_loss'].item():.4f}, novelty_product_loss={outputs['novelty_product_loss'].item():.4f}, price_loss={outputs['price_loss'].item():.4f}, total_loss={loss.item():.4f}")
+                logger.info(f"batch {batch_idx} losses: churn_loss={outputs['churn_loss'].item():.4f}, category_loss={outputs['category_loss'].item():.4f}, product_loss={outputs['product_loss'].item():.4f}, total_loss={loss.item():.4f}")
                 
                 # 记录各任务损失
                 for task in task_losses.keys():
@@ -376,7 +332,6 @@ class UBTTrainer:
         # 记录最佳指标，churn_auc 越高越好，price_mse 越低越好
         best_task_metrics = {
             'churn_auc': 0.0,
-            'price_mse': float('inf')
         }
         
         for epoch in range(self.config.num_epochs):
