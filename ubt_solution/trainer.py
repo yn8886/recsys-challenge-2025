@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
+import os
 import numpy as np
 from tqdm import tqdm
 import logging
@@ -51,7 +52,6 @@ class UBTTrainer:
         # 初始化评估指标：流失AUC 与 价格回归 MSE
         self.metrics = {
             'churn': BinaryAUROC(),
-            'price_mse': MeanSquaredError(),
         }
         
         # 将指标移动到设备
@@ -169,16 +169,12 @@ class UBTTrainer:
             'churn_loss': 0.0,
             'category_loss': 0.0,
             'product_loss': 0.0,
-            'price_loss': 0.0,
-            'novelty_category_loss': 0.0,
-            'novelty_product_loss': 0.0,
         }
         total_samples = 0
         
         # 收集预测/标签，用于计算指标
         task_metrics = {
             'churn': {'preds': [], 'targets': []},
-            'price': {'preds': [], 'targets': []}
         }
         
         # 排序指标收集
@@ -215,7 +211,7 @@ class UBTTrainer:
                 total_samples += batch['client_id'].size(0)
                 
                 # 记录各任务损失
-                for task in ['churn_loss','category_loss','product_loss','price_loss','novelty_category_loss','novelty_product_loss']:
+                for task in ['churn_loss','category_loss','product_loss']:
                     if task in outputs:
                         task_losses[task] += outputs[task].item() * batch['client_id'].size(0)
                 
@@ -286,16 +282,6 @@ class UBTTrainer:
                         idcg = (ideal_rel * ideal_discount).sum().item()
                         ndcg = dcg / idcg if idcg > 0 else 0.0
                         product_ndcgs.append(ndcg)
-                
-                # 收集 price 回归预测/标签（仅有标签样本）
-                price_pred = outputs['task_outputs'].get('price', None)
-                price_target = batch.get('price_target', None)
-                has_mask = batch.get('has_price_target', None)
-                if price_pred is not None and price_target is not None and has_mask is not None:
-                    mask = has_mask > 0.5
-                    if mask.any():
-                        task_metrics['price']['preds'].append(price_pred[mask].detach().cpu())
-                        task_metrics['price']['targets'].append(price_target[mask].detach().cpu())
         
         # 计算指标
         metrics = {'val_loss': total_loss / total_samples if total_samples > 0 else float('inf')}
@@ -304,18 +290,12 @@ class UBTTrainer:
         metrics['churn_loss'] = task_losses['churn_loss']/total_samples if total_samples>0 else float('inf')
         metrics['category_loss'] = task_losses['category_loss']/total_samples if total_samples>0 else float('inf')
         metrics['product_loss'] = task_losses['product_loss']/total_samples if total_samples>0 else float('inf')
-        metrics['price_loss'] = task_losses['price_loss']/total_samples if total_samples>0 else float('inf')
         
         # churn AUC
         if task_metrics['churn']['preds']:
             preds = torch.cat(task_metrics['churn']['preds'])
             targets = torch.cat(task_metrics['churn']['targets'])
             metrics['churn_auc'] = self.metrics['churn'](preds, targets).item()
-        # price 回归指标：MSE
-        if task_metrics['price']['preds']:
-            preds = torch.cat(task_metrics['price']['preds'])
-            targets = torch.cat(task_metrics['price']['targets'])
-            metrics['price_mse'] = self.metrics['price_mse'](preds, targets).item()
         
         # 添加排序指标
         metrics['category_recall@20'] = sum(category_recalls)/len(category_recalls) if category_recalls else 0.0
@@ -359,16 +339,9 @@ class UBTTrainer:
                 # 记录最佳任务指标
                 for metric_name in best_task_metrics:
                     if metric_name in val_metrics:
-                        if metric_name == 'price_mse':
-                            # 回归指标越低越好
-                            if val_metrics[metric_name] < best_task_metrics[metric_name]:
-                                best_task_metrics[metric_name] = val_metrics[metric_name]
-                                logger.info(f"New best {metric_name}: {best_task_metrics[metric_name]:.4f}")
-                        else:
-                            # 分类指标越高越好
-                            if val_metrics[metric_name] > best_task_metrics[metric_name]:
-                                best_task_metrics[metric_name] = val_metrics[metric_name]
-                                logger.info(f"New best {metric_name}: {best_task_metrics[metric_name]:.4f}")
+                        if val_metrics[metric_name] > best_task_metrics[metric_name]:
+                            best_task_metrics[metric_name] = val_metrics[metric_name]
+                            logger.info(f"New best {metric_name}: {best_task_metrics[metric_name]:.4f}")
                 
                 # 更新学习率
                 self.scheduler.step(val_loss)
@@ -378,7 +351,8 @@ class UBTTrainer:
                     best_val_loss = val_loss
                     patience_counter = 0
                     # 保存最佳模型
-                    torch.save(self.model.state_dict(), 'best_model.pt')
+                    os.makedirs(self.config.save_dir, exist_ok=True)
+                    torch.save(self.model.state_dict(), self.config.save_dir + 'best_model.pt')
                     logger.info(f"保存最佳模型，验证损失: {val_loss:.4f}")
                 else:
                     patience_counter += 1

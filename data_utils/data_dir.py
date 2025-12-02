@@ -1,5 +1,5 @@
 from pathlib import Path
-from data_utils.constants import PROPERTIES_FILE
+from constants import PROPERTIES_FILE
 
 
 class ChallengeDataDirectoryError(Exception):
@@ -26,7 +26,7 @@ class DataDir:
         self._data_dir = data_dir
         # self._input_dir = data_dir / "input"
         self._train_dir = data_dir / "train"
-        self._val_dir = data_dir / "val"
+        self._val_dir = data_dir / "valid"
         self._target_dir = data_dir / "target"
         self._properties_file = data_dir / PROPERTIES_FILE
 

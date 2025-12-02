@@ -54,6 +54,7 @@ class Config:
     num_workers: int = 10
     # 负采样数量，用于负采样softmax-ce损失
     num_negative_samples: int = 400
+    save_dir: str = "./save"
     output_dir: str = "./outputs"
     device: str = "cuda:0"
     use_cpu: bool = False  # 添加CPU选项
@@ -63,8 +64,6 @@ class Config:
         'churn': 1.0,
         'category_propensity': 0.5,
         'product_propensity': 0.5,
-        'price': 1.0,
-        'name': 0.5  # 下一个购买商品名称预测权重
     })
     
     # 稳定性参数

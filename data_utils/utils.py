@@ -1,7 +1,7 @@
 import pandas as pd
 import logging
 
-from data_utils.data_dir import DataDir
+from data_dir import DataDir
 
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.INFO)

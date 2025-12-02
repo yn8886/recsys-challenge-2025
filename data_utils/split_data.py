@@ -6,12 +6,12 @@ import argparse
 import logging
 
 
-from data_utils.constants import (
+from constants import (
     EventTypes,
     DAYS_IN_TARGET,
 )
-from data_utils.utils import join_properties
-from data_utils.data_dir import DataDir
+from utils import join_properties
+from data_dir import DataDir
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -175,7 +175,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--challenge-data-dir",
         type=str,
-        default='../dataset/ubc_data_small/',
+        default='../dataset/ubc_data_tiny/',
         help="Competition data directory which should consists of event files, product properties and two subdirectories — input and target",
     )
     return parser

@@ -48,7 +48,7 @@ class UniversalBehavioralTransformer(nn.Module):
         self.feature_encoder = EnhancedFeatureEncoder(config)
         
         # 加载 active_clients，用于限制 churn 损失计算
-        active_clients_np = np.load('../dataset/ubc_data_small/target/active_clients.npy')
+        active_clients_np = np.load('../dataset/ubc_data_tiny/target/active_clients.npy')
         self.register_buffer('active_client_ids', torch.from_numpy(active_clients_np).long())
         
         # Define Relative Attention Bias module once

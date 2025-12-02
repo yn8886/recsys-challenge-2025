@@ -55,7 +55,7 @@ class BehaviorSequenceDataset(Dataset):
             # self.base_dir = data_dir
             self.base_dir = data_dir / "train"
         else:
-            self.base_dir = data_dir / 'val'
+            self.base_dir = data_dir / 'valid'
         
         # 加载相关用户ID
         relevant_clients_path = data_dir / "relevant_clients.npy"
@@ -536,11 +536,11 @@ class BehaviorSequenceDataset(Dataset):
                                   EventType.REMOVE_FROM_CART.value] and sku != -1:
                     categories[i] = event['category_id']
                     prices[i] = event['price_id']
-                    names[i] = torch.tensor(vectorize_text(str(event['word_ids'])))
+                    names[i] = torch.Tensor(event['word_ids'])
             
             # 处理搜索查询
             if event_code == EventType.SEARCH_QUERY.value:
-                queries[i] = torch.tensor(vectorize_text(str(event['word_ids'])))
+                queries[i] = torch.Tensor(event['word_ids'])
                 
             # 处理URL
             if event_code == EventType.PAGE_VISIT.value:
@@ -576,47 +576,10 @@ class BehaviorSequenceDataset(Dataset):
             category_tensor = torch.zeros_like(category_tensor)
         if torch.isnan(product_tensor).any():
             product_tensor = torch.zeros_like(product_tensor)
-        
+
         # 获取预计算的用户交互类别和SKU
         cats = self.cats_in_target.get(client_id, [])
         skus = self.skus_in_target.get(client_id, [])
-        # 若目标列表为空，则使用序列中最近一次product_buy事件作为正样本
-        if not cats or not skus:
-            for evt in reversed(sequence):
-                if evt.get('event_type') == EventType.PRODUCT_BUY.value:
-                    buy_sku = evt.get('sku_id', None)
-                    if buy_sku is not None and buy_sku in self.product_dict:
-                        buy_cat = int(self.product_dict[buy_sku].get('category_id', 0))
-                        if not cats:
-                            cats = [buy_cat]
-                        if not skus:
-                            skus = [buy_sku]
-                        break
-        if not cats or not skus:
-            for evt in reversed(sequence):
-                if evt.get('event_type') == EventType.ADD_TO_CART.value:
-                    buy_sku = evt.get('sku_id', None)
-                    if buy_sku is not None and buy_sku in self.product_dict:
-                        buy_cat = int(self.product_dict[buy_sku].get('category_id', 0))
-                        if not cats:
-                            cats = [buy_cat]
-                        if not skus:
-                            skus = [buy_sku]
-                        break
-        if not cats or not skus:
-            for evt in reversed(sequence):
-                if evt.get('event_type') == EventType.REMOVE_FROM_CART.value:
-                    buy_sku = evt.get('sku_id', None)
-                    if buy_sku is not None and buy_sku in self.product_dict:
-                        buy_cat = int(self.product_dict[buy_sku].get('category_id', 0))
-                        if not cats:
-                            cats = [buy_cat]
-                        if not skus:
-                            skus = [buy_sku]
-                        break
-        # 正样本ID
-        pos_cat_id = cats[0] if len(cats) > 0 else 0
-        pos_sku_id = skus[0] if len(skus) > 0 else 0
         
         # 负采样：类别，排除已交互和目标，并加入 target_data 的 propensity_category
         propensity_category = [cate+2 for cate in self.target_data.propensity_category]
@@ -669,15 +632,13 @@ class BehaviorSequenceDataset(Dataset):
             'item_ids': item_ids,
             'cats_in_target': cats,
             'skus_in_target': skus,
-            'pos_cat_id': torch.tensor(pos_cat_id, dtype=torch.long),
             'neg_cat_ids': neg_cat_ids,
-            'pos_sku_id': torch.tensor(pos_sku_id, dtype=torch.long),
             'neg_sku_ids': neg_sku_ids,
             'user_feats': user_feats,
         }
         # 添加：将 novelty 计算所需数据加入 batch
-        result['propensity_category_ids'] = self.propensity_category_ids
-        result['propensity_sku_ids']      = self.propensity_sku_ids
+        result['propensity_category_ids'] = propensity_category
+        result['propensity_sku_ids']      = propensity_sku
 
         # 缓存结果，如果缓存过大则移除最早项
         if len(self.item_cache) >= self.cache_size:
