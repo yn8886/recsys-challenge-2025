@@ -1,5 +1,5 @@
 from pathlib import Path
-from constants import PROPERTIES_FILE
+from data_utils.constants import PROPERTIES_FILE
 
 
 class ChallengeDataDirectoryError(Exception):

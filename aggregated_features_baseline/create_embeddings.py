@@ -5,6 +5,9 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_utils.utils import load_with_properties
 from data_utils.data_dir import DataDir
 from features_aggregator import FeaturesAggregator
@@ -168,13 +171,13 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir",
         type=str,
-        default='../dataset/ubc_data_small/',
+        default='../dataset/ubc_data_tiny/',
         help="Directory with input and target data – produced by data_utils.split_data",
     )
     parser.add_argument(
-        "--train",
+        "--mode",
         type=str,
-        default=True,
+        default='train',
         help="Directory with input and target data – produced by data_utils.split_data",
     )
     parser.add_argument(
@@ -205,7 +208,7 @@ def main(params):
     relevant_client_ids = load_relevant_clients_ids(input_dir=data_dir.data_dir)
     client_ids, embeddings = create_embeddings(
         data_dir=data_dir,
-        train=params.train,
+        mode=params.mode,
         num_days=params.num_days,
         top_n=params.top_n,
         relevant_client_ids=relevant_client_ids,
