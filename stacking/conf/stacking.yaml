@@ -1,0 +1,71 @@
+hydra:
+  job:
+    name: stacking
+  run:
+    dir: ../submit/outputs/${hydra.job.name}
+
+defaults:
+  - _self_
+
+
+label_split:
+  train:
+    input_start_datetime: "2022-10-13 00:00:00"
+    input_end_datetime: "2022-10-27 00:00:00"
+    input_path: ../dataset/ubc_data_tiny/target/train_target.parquet
+  valid:
+    input_start_datetime: "2022-10-27 00:00:00"
+    input_end_datetime: "2022-11-10 00:00:00"
+    input_path: ../dataset/ubc_data_tiny/target/validation_target.parquet
+
+path_product_properties: ../dataset/ubc_data_tiny/product_properties.parquet
+
+path_product_buy: ../dataset/ubc_data_tiny/product_buy.parquet
+path_add_to_cart: ../dataset/ubc_data_tiny/add_to_cart.parquet
+path_remove_from_cart: ../dataset/ubc_data_tiny/remove_from_cart.parquet
+path_page_visit: ../dataset/ubc_data_tiny/page_visit.parquet
+path_search_query: ../dataset/ubc_data_tiny/search_query.parquet
+
+path_relevant_clients: ../dataset/ubc_data_tiny/relevant_clients.npy
+path_propensity_sku: ../dataset/ubc_data_tiny/target/propensity_sku.npy
+path_propensity_category: ../dataset/ubc_data_tiny/target/propensity_category.npy
+
+mode:
+  local:
+    - rintaro.zip
+    - 313038_local.zip
+  submit:
+    - v4001_sub_embeddings.zip
+    - rintaro.zip
+    - 313038.zip
+
+normalize: false
+
+do_svd: false
+svd_n_components: 256
+svd_device: cpu
+
+# Statistical alignment settings
+do_align_embed: false
+align_n_components: 64
+
+client_order: null
+
+tasks:
+  - churn
+  - propensity_sku
+  - propensity_category
+
+embedding_dim: 512
+hidden_size_thin: 2048
+hidden_size_wide: 4096
+
+lr: 1.0e-3
+
+max_epochs: 1
+fast_dev_run: false
+
+batch_size: 128
+num_workers: 1
+
+accelerator: cpu

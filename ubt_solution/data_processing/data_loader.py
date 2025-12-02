@@ -55,11 +55,28 @@ def create_data_loaders(data_dir: Path, config: Config, mode: str = 'train', tes
             collate_fn=custom_collate
         )
         return valid_loader
-    elif mode == 'infer':
+    elif mode == 'train_infer':
         infer_dataset = BehaviorSequenceDataset(
             data_dir=data_dir,
             config=config,
-            mode='infer',
+            mode='train',
+            test_mode=test_mode
+        )
+        infer_loader = DataLoader(
+            infer_dataset,
+            batch_size=config.batch_size,
+            shuffle=False,
+            num_workers=config.num_workers,
+            pin_memory=True,
+            drop_last=False,
+            collate_fn=custom_collate
+        )
+        return infer_loader
+    elif mode == 'valid_infer':
+        infer_dataset = BehaviorSequenceDataset(
+            data_dir=data_dir,
+            config=config,
+            mode='valid',
             test_mode=test_mode
         )
         infer_loader = DataLoader(

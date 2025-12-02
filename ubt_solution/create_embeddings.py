@@ -26,7 +26,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--embeddings-dir",
         type=str,
-        default='../submit/ubt_emb/train_features_epoch3_category/',
+        default='../submit/ubt_emb/train/',
         help="Directory to save generated embeddings",
     )
     parser.add_argument(
@@ -34,6 +34,11 @@ def get_parser() -> argparse.ArgumentParser:
         type=str,
         default='./save/train_features_epoch3_category/',
         help="Path to the saved model checkpoint (e.g., best_model.pt)",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default='train_infer',
     )
     parser.add_argument(
         "--accelerator",
@@ -108,7 +113,7 @@ def main():
     infer_loader = create_data_loaders(
         data_dir=Path(args.data_dir),
         config=config,
-        mode='infer',
+        mode=args.mode,
         test_mode=args.test_mode
     )
 
