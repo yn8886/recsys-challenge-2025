@@ -73,22 +73,22 @@ class FeaturesAggregator:
         )
 
     def get_calculator(self, event_type: EventTypes, df: pd.DataFrame, columns: List[str]) -> Calculator:
-        if event_type is EventTypes.SEARCH_QUERY:
-            if df.empty:
-                dummy_vector = "[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]"
-                return QueryFeaturesCalculator(query_column=QUERY_COLUMN, single_query=dummy_vector)
-            return QueryFeaturesCalculator(
-                query_column=QUERY_COLUMN, single_query=df.iloc[0][QUERY_COLUMN]
-            )
-        else:
-            max_date = df["timestamp"].max()
-            unique_values = get_top_values(df, columns, self.top_n)
-            return StatsFeaturesCalculator(
-                num_days=self.num_days,
-                max_date=max_date,
-                columns=columns,
-                unique_values=unique_values,
-            )
+        # if event_type is EventTypes.SEARCH_QUERY:
+        #     if df.empty:
+        #         dummy_vector = "[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]"
+        #         return QueryFeaturesCalculator(query_column=QUERY_COLUMN, single_query=dummy_vector)
+        #     return QueryFeaturesCalculator(
+        #         query_column=QUERY_COLUMN, single_query=df.iloc[0][QUERY_COLUMN]
+        #     )
+        # else:
+        max_date = df["timestamp"].max()
+        unique_values = get_top_values(df, columns, self.top_n)
+        return StatsFeaturesCalculator(
+            num_days=self.num_days,
+            max_date=max_date,
+            columns=columns,
+            unique_values=unique_values,
+        )
 
     def _filter_events_to_relevant_clients(self, df: pd.DataFrame) -> pd.DataFrame:
         return df[df["client_id"].isin(self._relevant_client_ids)]
@@ -349,8 +349,6 @@ class FeaturesAggregator:
             ewa=ewa_dict.get(client_id)     # 16
             ratio=ratio_dict.get(client_id)   # 5
             life=life_dict.get(client_id)    # 3
-            
-            embeddings_for_client.insert(0, ewa)  # insert ewa at front
 
             embeddings_for_client.append(np.concatenate([rec, cnt, ent, ratio, life, ewa]))
 

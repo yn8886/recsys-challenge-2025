@@ -16,7 +16,7 @@ EVENT_TYPE_TO_COLUMNS: Dict[EventTypes, List[str]] = {
     EventTypes.ADD_TO_CART: ["sku", "category", "price"],
     EventTypes.REMOVE_FROM_CART: ["sku", "category", "price"],
     EventTypes.PAGE_VISIT: ["url"],
-    EventTypes.SEARCH_QUERY: [],
+    EventTypes.SEARCH_QUERY: ["query"],
 }
 
 QUERY_COLUMN = "query"

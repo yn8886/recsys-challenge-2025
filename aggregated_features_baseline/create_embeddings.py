@@ -102,26 +102,7 @@ def create_embeddings(
     logger.info("Merging features with recency, frequency, and product name embeddings...")
     client_ids, base_embeddings = aggregator.merge_features(all_events=all_events)
 
-
-    final_embeddings = []
-
-    for idx, client_id in enumerate(tqdm(client_ids, desc="Merging final embeddings")):
-        if client_id in product_name_vectors_by_client:
-            vectors = np.stack(product_name_vectors_by_client[client_id], axis=0)
-            scaled_vector = vectors.mean(axis=0)  
-        else:
-            dim = next(iter(product_name_embeddings.values())).shape[0]
-            scaled_vector = np.zeros(dim, dtype=np.float64)
-
-
-        # 拼接到 embedding
-        combined = np.concatenate([
-            base_embeddings[idx].astype(np.float64),
-            scaled_vector,
-        ])
-        final_embeddings.append(combined)
-
-    emb = np.array(final_embeddings, dtype=np.float64)
+    emb = np.array(base_embeddings, dtype=np.float64)
 
     core_emb = emb
 
@@ -141,20 +122,13 @@ def create_embeddings(
         (181, 362), # add_to_cart_stats
         (362, 543), # remove_from_cart_stats
         (543, 604), # page_visit_stats
-        (604, 620), # search_query_stats
-        (620, 624), # recency
-        (624, 628), # buy_counts
-        (628, 632), # add_counts
-        (632, 636), # visit_counts
-        (636, 640), # remove_counts2
-        (640, 644), # entropy
-        (644, 649), # 7d_ratios
-        (649, 654), # 30d_ratios
-        (654, 659), # 90d_ratios
-        (659, 664), # 180d_ratios
-        (664, 667), # lifecycle
-        (667, 691), # ewa
-        (691, 691 + EMB_DIM), # product_name_embeddings
+        (604, 665), # search_query_stats
+        (665, 669), # recency
+        (669, 677), # counts
+        (677, 678), # entropy
+        (678, 683), # 30d_ratios
+        (683, 686), # lifecycle
+        (686, 710), # ewa
     ]
     for start, end in block_ranges:
         blk = core_emb_std[:, start:end]
