@@ -14,7 +14,24 @@ class Config:
     num_heads: int = 4  # 注意力头数量
     num_layers: int = 3  # HSTU层数
     dropout: int = 0.2  # dropout比例
-    
+
+    # 特征维度
+    # num_categories: int = 10000
+    # num_candidates_categories: int = 100
+    # num_products: int = 100  # 添加产品数量参数
+    # num_behaviors: int = 6  # 购买、加购、移除、页面访问、搜索
+    # name_vector_dim: int = 16
+    # query_vector_dim: int = 16
+    #
+    # # 新增URL和Item ID特征配置
+    # url_hash_size: int = 100000  # URL哈希空间大小
+    # item_embedding_dim: int = 128  # Item ID嵌入维度
+    # url_embedding_dim: int = 128  # URL嵌入维度
+    # max_item_id: int = 2000000  # 最大Item ID数量
+    #
+    # # 添加：SKU哈希空间大小
+    # sku_hash_size: int = 10000  # 将原始SKU映射到此哈希空间
+
     # HSTU特定参数
     attention_dim: int = 128  # 注意力维度
     linear_dim: int = 256  # 线性层维度
@@ -25,23 +42,29 @@ class Config:
     time_buckets: int = 128  # 时间桶数量
     
     # 特征维度
-    num_categories: int = 6995
-    num_candidates_categories: int = 100
-    num_products: int = 100  # 添加产品数量参数
-    num_url:int = 373500
-    num_sku:int = 1260370
-    name_vector_dim: int = 16
-    query_vector_dim: int = 16
-    
-    # 新增URL和Item ID特征配置
-    item_embedding_dim: int = 128  # Item ID嵌入维度
-    url_embedding_dim: int = 128   # URL嵌入维度
+    num_event = 5 + 2
+    num_sku = 1_260_370
+    num_cat = 6_995
+    num_price = 100 + 2
+    num_url = 373_500
+    num_word = 256 + 3
+    static_features_dim = 46
+    item_emb_dim = 128
+    url_emb_dim = 128
+    event_emb_dim = 8
+    sku_emb_dim = 384
+    cat_emb_dim = 96
+    price_emb_dim = 16
     
     # 行为类型配置
     max_seq_length: int = 150  # 序列长度
-    
+
+    fusion_mlp_hidden_dim = 256
+    fusion_mlp_output_dim = 256
+    fusion_mlp_dropout = 0.01
+
     # 训练配置
-    batch_size: int = 8192  # 批次大小
+    batch_size: int = 128  # 批次大小
     learning_rate: float = 5e-5  # 学习率
     weight_decay: float = 1e-3  # 权重衰减
     num_epochs: int = 150  # 训练轮数
@@ -51,7 +74,7 @@ class Config:
     # 设备配置
     accelerator: str = "cuda"
     devices: List[int] = field(default_factory=lambda: [0])
-    num_workers: int = 10
+    num_workers: int = 0
     # 负采样数量，用于负采样softmax-ce损失
     num_negative_samples: int = 400
     save_dir: str = "./save"
@@ -86,11 +109,7 @@ class Config:
     propensity_positive_sample_weight_boost: float = 5.0 # 对有真实标签的倾向性样本的额外权重提升值
     propensity_negative_sample_weight: float = 0.2 # 对无真实标签的样本赋予较小权重
     
-    padding_idx: Dict[str, int] = field(default_factory=lambda: {
-        'category': 0, 
-        'price': 0,
-        # Add other features here if they also need specific padding indices for embedding layers
-    })
+    padding_idx = 0
     
     # 价格最大值，用于将 sigmoid 输出映射到实际区间 [0, max_price]
     max_price: int = 100

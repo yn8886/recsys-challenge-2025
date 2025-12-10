@@ -44,7 +44,7 @@ class EventType(Enum):
 class CFG:
     n_epochs = 3
     batch_size = 128
-    num_workers = 12
+    num_workers = 0
     num_event = 5 + 2
     num_sku = 1_260_370
     num_cat = 6_995
@@ -210,29 +210,27 @@ class RecsysDatasetV12(Dataset):
         word_id = self.word_ids[idx]
         category_id = self.category_ids[idx]
         price_id = self.price_ids[idx]
-        diff_days = self.diff_days[idx]
-        diff_weeks = self.diff_weeks[idx]
 
         # statistical features
         statistical_features = self.statistical_features[idx]
 
         # labels
-        buy_sku_label = self.buy_sku_labels[idx]
-        buy_cat_label = self.buy_cat_labels[idx]
-        buy_price_label = self.buy_price_labels[idx]
-        add_sku_label = self.add_sku_labels[idx]
-        add_cat_label = self.add_cat_labels[idx]
-        add_price_label = self.add_price_labels[idx]
-
-        is_contain_buy_sku = self.contain_buy_sku_labels[idx]
-        is_contain_buy_cat = self.contain_buy_cat_labels[idx]
-        is_contain_buy_price = self.contain_buy_price_labels[idx]
-        is_contain_add_sku = self.contain_add_sku_labels[idx]
-        is_contain_add_cat = self.contain_add_cat_labels[idx]
-        is_contain_add_price = self.contain_add_price_labels[idx]
-
-        is_churn = self.is_churn[idx]
-        is_add = self.is_add[idx]
+        # buy_sku_label = self.buy_sku_labels[idx]
+        # buy_cat_label = self.buy_cat_labels[idx]
+        # buy_price_label = self.buy_price_labels[idx]
+        # add_sku_label = self.add_sku_labels[idx]
+        # add_cat_label = self.add_cat_labels[idx]
+        # add_price_label = self.add_price_labels[idx]
+        #
+        # is_contain_buy_sku = self.contain_buy_sku_labels[idx]
+        # is_contain_buy_cat = self.contain_buy_cat_labels[idx]
+        # is_contain_buy_price = self.contain_buy_price_labels[idx]
+        # is_contain_add_sku = self.contain_add_sku_labels[idx]
+        # is_contain_add_cat = self.contain_add_cat_labels[idx]
+        # is_contain_add_price = self.contain_add_price_labels[idx]
+        #
+        # is_churn = self.is_churn[idx]
+        # is_add = self.is_add[idx]
 
         # padding and masking sequence
         event_type, _ = self._pad_sequence(event_type)
@@ -241,18 +239,16 @@ class RecsysDatasetV12(Dataset):
         category_id, _ = self._pad_sequence(category_id)
         price_id, _ = self._pad_sequence(price_id)
         word_id, _ = self._pad_word_sequence(word_id)
-        diff_days, _ = self._pad_sequence(diff_days)
-        diff_weeks, _ = self._pad_sequence(diff_weeks)
 
         # statistical features
         statistical_features = torch.tensor(statistical_features, dtype=torch.float)
 
-        buy_sku_label = torch.tensor(buy_sku_label, dtype=torch.long)
-        buy_cat_label = torch.tensor(buy_cat_label, dtype=torch.long)
-        buy_price_label = torch.tensor(buy_price_label, dtype=torch.long)
-        add_sku_label = torch.tensor(add_sku_label, dtype=torch.long)
-        add_cat_label = torch.tensor(add_cat_label, dtype=torch.long)
-        add_price_label = torch.tensor(add_price_label, dtype=torch.long)
+        # buy_sku_label = torch.tensor(buy_sku_label, dtype=torch.long)
+        # buy_cat_label = torch.tensor(buy_cat_label, dtype=torch.long)
+        # buy_price_label = torch.tensor(buy_price_label, dtype=torch.long)
+        # add_sku_label = torch.tensor(add_sku_label, dtype=torch.long)
+        # add_cat_label = torch.tensor(add_cat_label, dtype=torch.long)
+        # add_price_label = torch.tensor(add_price_label, dtype=torch.long)
 
         return_dict = {
             "client_id": client_id,
@@ -263,26 +259,24 @@ class RecsysDatasetV12(Dataset):
                 "category": category_id,
                 "price": price_id,
                 "word": word_id,
-                "diff_days": diff_days,
-                "diff_weeks": diff_weeks,
             },
             "statistical_feature": statistical_features,
-            "labels": {
-                "is_churn": is_churn,
-                "is_add": is_add,
-                "buy_sku_label": buy_sku_label,
-                "buy_cat_label": buy_cat_label,
-                "buy_price_label": buy_price_label,
-                "add_sku_label": add_sku_label,
-                "add_cat_label": add_cat_label,
-                "add_price_label": add_price_label,
-                "is_contain_buy_sku": is_contain_buy_sku,
-                "is_contain_buy_cat": is_contain_buy_cat,
-                "is_contain_buy_price": is_contain_buy_price,
-                "is_contain_add_sku": is_contain_add_sku,
-                "is_contain_add_cat": is_contain_add_cat,
-                "is_contain_add_price": is_contain_add_price,
-            },
+            # "labels": {
+            #     "is_churn": is_churn,
+            #     "is_add": is_add,
+            #     "buy_sku_label": buy_sku_label,
+            #     "buy_cat_label": buy_cat_label,
+            #     "buy_price_label": buy_price_label,
+            #     "add_sku_label": add_sku_label,
+            #     "add_cat_label": add_cat_label,
+            #     "add_price_label": add_price_label,
+            #     "is_contain_buy_sku": is_contain_buy_sku,
+            #     "is_contain_buy_cat": is_contain_buy_cat,
+            #     "is_contain_buy_price": is_contain_buy_price,
+            #     "is_contain_add_sku": is_contain_add_sku,
+            #     "is_contain_add_cat": is_contain_add_cat,
+            #     "is_contain_add_price": is_contain_add_price,
+            # },
         }
         return return_dict
 
@@ -415,7 +409,7 @@ class BehaviorSequenceTransformer(nn.Module):
         self.padding_idx = cfg.padding_idx
         self.device = device
         self.d_model = (
-            cfg.event_emb_dim + cfg.item_emb_dim + cfg.day_emb_dim + cfg.week_emb_dim
+            cfg.event_emb_dim + cfg.item_emb_dim
         )
         self.dtype = dtype
 
@@ -533,8 +527,6 @@ class BehaviorSequenceTransformer(nn.Module):
         cat_id,
         price_id,
         word_id,
-        diff_days,
-        diff_weeks,
     ):
         src_padding_mask = self._generate_padding_mask(event_type)
         event_type_seq_emb = self.event_emb_layer(event_type)
@@ -547,11 +539,9 @@ class BehaviorSequenceTransformer(nn.Module):
             word_id,
         )
 
-        day_seq_emb = self.day_emb_layer(diff_days)
-        week_seq_emb = self.week_emb_layer(diff_weeks)
 
         seq_emb = torch.concat(
-            [event_type_seq_emb, event_content_seq_emb, day_seq_emb, week_seq_emb],
+            [event_type_seq_emb, event_content_seq_emb],
             dim=-1,
         )
         seq_emb = self.pos_encoder(seq_emb)
@@ -568,8 +558,6 @@ class BehaviorSequenceTransformer(nn.Module):
         cat_id,
         price_id,
         word_id,
-        diff_days,
-        diff_weeks,
     ):
         user_emb = self.compute_user_embedding(
             event_type,
@@ -578,8 +566,6 @@ class BehaviorSequenceTransformer(nn.Module):
             cat_id,
             price_id,
             word_id,
-            diff_days,
-            diff_weeks,
         )
 
         return user_emb
@@ -814,7 +800,7 @@ class LightningRecsysModel(L.LightningModule):
         super().__init__()
         self.cfg = cfg
         self.d_model = (
-            cfg.event_emb_dim + cfg.item_emb_dim + cfg.day_emb_dim + cfg.week_emb_dim
+            cfg.event_emb_dim + cfg.item_emb_dim
         )
 
         self.user_emb_dim = cfg.fusion_mlp_output_dim
@@ -874,12 +860,10 @@ class LightningRecsysModel(L.LightningModule):
         cat_id,
         price_id,
         word_id,
-        diff_days,
-        diff_weeks,
         statistical_features,
     ):
         seq_feat_emb = self.encoder(
-            event_type, sku_id, url_id, cat_id, price_id, word_id, diff_days, diff_weeks
+            event_type, sku_id, url_id, cat_id, price_id, word_id
         )
 
         concat_feat = torch.concat(
@@ -941,7 +925,7 @@ class LightningRecsysModel(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         original_seq = batch["original_seq"]
-        labels = batch["labels"]
+        # labels = batch["labels"]
         # statistical feat
         statistical_feature = batch["statistical_feature"]
 
@@ -952,27 +936,27 @@ class LightningRecsysModel(L.LightningModule):
         category = original_seq["category"]
         price = original_seq["price"]
         word = original_seq["word"]
-        diff_days = original_seq["diff_days"]
-        diff_weeks = original_seq["diff_weeks"]
+        # diff_days = original_seq["diff_days"]
+        # diff_weeks = original_seq["diff_weeks"]
 
         # label
-        label_churn = labels["is_churn"]
-        label_add = labels["is_add"]
-        label_buy_sku = labels["buy_sku_label"]
-        label_buy_cat = labels["buy_cat_label"]
-        label_buy_price = labels["buy_price_label"]
-
-        label_add_sku = labels["add_sku_label"]
-        label_add_cat = labels["add_cat_label"]
-        label_add_price = labels["add_price_label"]
-
-        is_contain_buy_sku = labels["is_contain_buy_sku"]
-        is_contain_buy_cat = labels["is_contain_buy_cat"]
-        is_contain_buy_price = labels["is_contain_buy_price"]
-
-        is_contain_add_sku = labels["is_contain_add_sku"]
-        is_contain_add_cat = labels["is_contain_add_cat"]
-        is_contain_add_price = labels["is_contain_add_price"]
+        # label_churn = labels["is_churn"]
+        # label_add = labels["is_add"]
+        # label_buy_sku = labels["buy_sku_label"]
+        # label_buy_cat = labels["buy_cat_label"]
+        # label_buy_price = labels["buy_price_label"]
+        #
+        # label_add_sku = labels["add_sku_label"]
+        # label_add_cat = labels["add_cat_label"]
+        # label_add_price = labels["add_price_label"]
+        #
+        # is_contain_buy_sku = labels["is_contain_buy_sku"]
+        # is_contain_buy_cat = labels["is_contain_buy_cat"]
+        # is_contain_buy_price = labels["is_contain_buy_price"]
+        #
+        # is_contain_add_sku = labels["is_contain_add_sku"]
+        # is_contain_add_cat = labels["is_contain_add_cat"]
+        # is_contain_add_price = labels["is_contain_add_price"]
 
         user_emb = self.compute_user_embedding(
             event_type,
@@ -981,8 +965,6 @@ class LightningRecsysModel(L.LightningModule):
             category,
             price,
             word,
-            diff_days,
-            diff_weeks,
             statistical_feature,
         )
 

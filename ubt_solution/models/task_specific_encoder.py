@@ -5,8 +5,8 @@ from typing import Dict
 from config import Config
 # from training_pipeline.constants import HIDDEN_SIZE_THIN, HIDDEN_SIZE_WIDE
 
-HIDDEN_SIZE_THIN=2048
-HIDDEN_SIZE_WIDE=4096
+HIDDEN_SIZE_THIN=128
+HIDDEN_SIZE_WIDE=256
 # 本地复制 DLRM_v3 的 init_mlp_weights_optional_bias
 def init_mlp_weights_optional_bias(m: torch.nn.Module) -> None:
     if isinstance(m, nn.Linear):
@@ -70,7 +70,7 @@ class HeadNet(nn.Module):
 class TaskSpecificEncoder(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
-        self.config = config # Store config
+        self.config = config  # Store config
         # 共享底层表示
         self.shared_encoder = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size),
@@ -78,46 +78,35 @@ class TaskSpecificEncoder(nn.Module):
             nn.ReLU(),
             nn.Dropout(config.dropout)
         )
-        
+
         # 任务头 - 与 training_pipeline 中 Net 结构一致（添加 price 回归头）
-        self.task_heads = nn.ModuleDict({
-            'churn': HeadNet(
+        self.task_heads = HeadNet(
                 input_dim=config.hidden_size,
                 output_dim=1,
                 thin_dim=HIDDEN_SIZE_THIN,
                 wide_dim=HIDDEN_SIZE_WIDE
-            ),
-            'price': HeadNet(
-                input_dim=config.hidden_size,
-                output_dim=1,
-                thin_dim=HIDDEN_SIZE_THIN,
-                wide_dim=HIDDEN_SIZE_WIDE
-            ),
-        })
-        
+        )
+
         # 初始化权重（部分在 init_mlp_weights_optional_bias 中已处理）
         self._initialize_weights()
-        
+
     def _initialize_weights(self):
-        for name, module in self.task_heads.items():
+        for module in self.task_heads.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight, gain=0.01)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-        
+
     def forward(self, user_embedding: torch.Tensor) -> Dict[str, torch.Tensor]:
         outputs = {}
-        
+
         # 共享表示
         shared_features = self.shared_encoder(user_embedding)
-        
-        # 流失预测
-        outputs['churn'] = self.task_heads['churn'](shared_features).squeeze(-1)
 
-        # 价格回归预测
-        # outputs['price'] = self.task_heads['price'](shared_features).squeeze(-1)
-        
+        # 流失预测
+        outputs['churn'] = self.task_heads(shared_features).squeeze(-1)
+
         # 可选：对 churn 输出裁剪以稳定训练
         outputs['churn'] = torch.clamp(outputs['churn'], min=-10.0, max=10.0)
-        
-        return outputs 
+
+        return outputs

@@ -152,8 +152,8 @@ def _hstu_attention_maybe_from_cache(
             start, end = offset_starts[i], offset_ends[i]
             length = min(end - start, n)
             if length > 0:
-                padded_q[i, :length] = q[start:start+length]
-                padded_k[i, :length] = k[start:start+length]
+                padded_q[i, -length:] = q[start:start+length]
+                padded_k[i, -length:] = k[start:start+length]
 
     # 重塑为多头注意力格式
     padded_q = padded_q.view(B, n, num_heads, attention_dim)
@@ -181,7 +181,7 @@ def _hstu_attention_maybe_from_cache(
         start, end = offset_starts[i], offset_ends[i]
         length = min(end - start, n)
         if length > 0:
-            padded_v[i, :length] = v[start:start+length]
+            padded_v[i, -length:] = v[start:start+length]
     
     # 重塑为多头格式
     padded_v = padded_v.reshape(B, n, num_heads, linear_dim)
@@ -196,7 +196,7 @@ def _hstu_attention_maybe_from_cache(
         start, end = offset_starts[i], offset_ends[i]
         length = min(end - start, n)
         if length > 0:
-            jagged_output.append(attn_output[i, :length])
+            jagged_output.append(attn_output[i, -length:])
     
     if jagged_output:
         attn_output_jagged = torch.cat(jagged_output, dim=0)
@@ -272,7 +272,7 @@ class SequentialTransductionUnitJagged(nn.Module):
         cache: Optional[List[HSTUCacheState]] = None,
         return_cache_states: bool = False,
     ) -> Tuple[torch.Tensor, HSTUCacheState]:
-        
+
         # ----- Multi-Head Attention Sub-layer (Pre-LN) -----
         normed_x_attn = self.norm1(x)
         
@@ -323,11 +323,22 @@ class HSTUJagged(nn.Module):
     def __init__(
         self,
         modules: List[SequentialTransductionUnitJagged],
+        max_length,
         autocast_dtype: torch.dtype = None,
     ) -> None:
         super().__init__()
         self._attention_layers: nn.ModuleList = nn.ModuleList(modules=modules)
         self._autocast_dtype: torch.dtype = autocast_dtype
+        self.register_buffer(
+            "_attn_mask",
+            torch.triu(
+                torch.ones(
+                    (max_length, max_length),
+                    dtype=torch.bool,
+                ),
+                diagonal=1,
+            ),
+        )
 
     def jagged_forward(
         self,
@@ -375,14 +386,20 @@ class HSTUJagged(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        x_offsets: torch.Tensor,
         all_timestamps: Optional[torch.Tensor],
-        invalid_attn_mask: torch.Tensor,
+        mask = None,
         delta_x_offsets: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         cache: Optional[List[HSTUCacheState]] = None,
         return_cache_states: bool = False,
+        device=torch.device("cpu"),
     ) -> Tuple[torch.Tensor, List[HSTUCacheState]]:
-        
+
+        batch_size, seq_len, hidden_size = x.shape
+        mask = ~mask
+        seq_lengths = mask.sum(dim=1).to(torch.int32)
+        x_offsets = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+        x_offsets[1:] = torch.cumsum(seq_lengths, dim=0)
+
         # 如果输入是密集张量，转换为不规则张量
         is_dense_input = len(x.size()) == 3
         if is_dense_input:
@@ -391,8 +408,8 @@ class HSTUJagged(nn.Module):
             offset_starts = x_offsets[:-1].tolist()
             offset_ends = x_offsets[1:].tolist()
             
-            for i in range(B):
-                length = min(offset_ends[i] - offset_starts[i], N)
+            for i in range(batch_size):
+                length = min(offset_ends[i] - offset_starts[i], seq_len)
                 if length > 0:
                     jagged_x.append(x[i, :length])
             
@@ -400,6 +417,9 @@ class HSTUJagged(nn.Module):
                 x = torch.cat(jagged_x, dim=0)
             else:
                 x = torch.zeros(0, D, device=x.device)
+
+        causal_mask = 1.0 - self._attn_mask[:seq_len, :seq_len].float()
+        invalid_attn_mask = causal_mask
 
         # 前向传播
         jagged_x, cache_states = self.jagged_forward(
@@ -417,8 +437,8 @@ class HSTUJagged(nn.Module):
             B = x_offsets.size(0) - 1
             N = invalid_attn_mask.size(0)
             D = jagged_x.size(-1)
-            
-            y = torch.zeros(B, N, D, device=jagged_x.device)
+
+            seq_feat_emb = torch.zeros(B, N, D, device=jagged_x.device)
             
             offset_starts = x_offsets[:-1].tolist()
             offset_ends = x_offsets[1:].tolist()
@@ -427,9 +447,27 @@ class HSTUJagged(nn.Module):
             for i in range(B):
                 length = min(offset_ends[i] - offset_starts[i], N)
                 if length > 0:
-                    y[i, :length] = jagged_x[current_idx:current_idx+length]
+                    seq_feat_emb[i, :length] = jagged_x[current_idx:current_idx+length]
                     current_idx += length
-            
-            return y, cache_states
+
+            # L2 normalize per-step sequence embeddings
+            seq_feat_emb = F.normalize(seq_feat_emb, p=2, dim=-1)
+
+            # 矢量化 last+avg 池化，去除 Python 循环
+            lengths = seq_lengths.long()  # 转为 int64，保证 gather index 合法  [B]
+            # 取最后一步输出
+            idx = (lengths - 1).unsqueeze(-1).unsqueeze(-1).expand(batch_size, 1, hidden_size)
+            last = torch.gather(seq_feat_emb, dim=1, index=idx).squeeze(1)  # [B, H]
+
+            # 平均池化
+            mask_f = mask.float().unsqueeze(-1)  # [B, T, 1]
+            sum_emb = (seq_feat_emb * mask_f).sum(dim=1)  # [B, H]
+            avg = sum_emb / lengths.unsqueeze(1)  # [B, H]
+            # 融合
+            seq_feat_emb = 0.5 * (last + avg)
+            # L2 normalize pooled user embedding
+            seq_feat_emb = F.normalize(seq_feat_emb, p=2, dim=-1)
+
+            return seq_feat_emb, cache_states
         else:
             return jagged_x, cache_states 

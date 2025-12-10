@@ -1,19 +1,10 @@
 import argparse
-import math
 import os
 from datetime import datetime
 from enum import Enum
-
-import lightning as L
 import numpy as np
 import polars as pl
-import torch
-import torch.nn as nn
-from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.loggers import WandbLogger
 from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DataLoader, Dataset
-from torchmetrics.classification import AUROC, MultilabelAccuracy
 from tqdm import tqdm
 
 DATASET_DIR = "../dataset/ubc_data_tiny"
@@ -24,8 +15,6 @@ VALID_DIR = os.path.join(DATASET_DIR, "valid")
 TARGET_DIR = os.path.join(DATASET_DIR, "target")
 ONLY_RELEVANT_CLIENTS = True
 
-
-INPUT_END_DATETIME = datetime(2022, 10, 13, 0, 0, 0)
 
 TARGET_TARGET_START = datetime(2022, 10, 13, 0, 0, 0)
 VALID_TARGET_START = datetime(2022, 10, 27, 0, 0, 0)
