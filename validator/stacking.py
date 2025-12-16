@@ -49,7 +49,7 @@ def main(cfg: DictConfig):
         list_embeddings = []
         for file in cfg.mode[mode]:
             logger.info(f"mode: train, file: {file}")
-            file_path = Path(f"../submit/valid/{mode}/{file}")
+            file_path = Path(f"../submit/validator/{mode}/{file}")
             arr_clients, arr_embeddings = read_embedding_zip(file_path)
             embedding = Embedding(file, arr_clients, arr_embeddings)
             list_embeddings.append(embedding)

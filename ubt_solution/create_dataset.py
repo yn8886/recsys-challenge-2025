@@ -403,6 +403,7 @@ def create_positive_negative_samples(
         "pos_cat_ids": pos_cat_ids_list,
         "neg_cat_ids": neg_cat_ids_list,
         "is_churn": is_churn_list,
+
     }
 
     schema = {
@@ -683,12 +684,62 @@ def main():
     candidate_sku = np.load(os.path.join(TARGET_DIR, "propensity_sku.npy"))
     candidate_cat = np.load(os.path.join(TARGET_DIR, "propensity_category.npy"))
 
-    agg_product_buy_df = product_buy_target_df.group_by("client_id").agg(
+    target_df = product_buy_target_df.group_by("client_id").agg(
         pl.col("sku").alias("buy_sku"),
+        pl.col("category").alias("buy_cat"),
     )
 
+    sku_candidates = np.load(os.path.join(TARGET_DIR, "propensity_sku.npy"))
+    cat_candidates = np.load(os.path.join(TARGET_DIR, "propensity_category.npy"))
+
+    client_ids = []
+    buy_sku_labels = []
+    buy_cat_labels = []
+    contain_buy_sku_label = []
+    contain_buy_cat_label = []
+
+    for i in tqdm(range(len(target_df))):
+        client_id = target_df["client_id"][i]
+
+        if target_df["buy_sku"][i] is None:
+            buy_sku = np.array([-1])
+            buy_cat = np.array([-1])
+        else:
+            buy_sku = target_df["buy_sku"][i].to_numpy()
+            buy_cat = target_df["buy_cat"][i].to_numpy()
+
+        buy_sku_label = np.isin(sku_candidates, buy_sku).astype(np.int32)
+        buy_cat_label = np.isin(cat_candidates, buy_cat).astype(np.int32)
+
+        client_ids.append(client_id)
+        buy_sku_labels.append(buy_sku_label)
+        buy_cat_labels.append(buy_cat_label)
+
+        contain_buy_sku_label.append(1 if np.sum(buy_sku_label) > 0 else 0)
+        contain_buy_cat_label.append(1 if np.sum(buy_cat_label) > 0 else 0)
+
+    data = {
+        "client_id": client_ids,
+        "buy_sku_label": buy_sku_labels,
+        "buy_cat_label": buy_cat_labels,
+        "contain_buy_sku_label": contain_buy_sku_label,
+        "contain_buy_cat_label": contain_buy_cat_label,
+    }
+
+    schema = {
+        "client_id": pl.Int64,
+        "buy_sku_label": pl.List(pl.Int32),
+        "buy_cat_label": pl.List(pl.Int32),
+        "contain_buy_sku_label": pl.Int32,
+        "contain_buy_cat_label": pl.Int32,
+    }
+
+    label_df = pl.from_dicts(data=data, schema=schema)
+
+    input_df = input_df.join(label_df, on="client_id", how="inner")
+
     label_df = create_positive_negative_samples(
-        agg_product_buy_df,
+        target_df,
         relevant_client_ids,
         sku2id_mapping,
         candidate_sku,

@@ -16,7 +16,11 @@ class StackingDataset(Dataset):
         tasks: list[str],
     ):
         if df_labels is not None:
-            self.df_labels = df_labels.sort("client_id")
+            relevant_clients_set = set(arr_relevant_clients)
+            self.df_labels = df_labels.filter(
+                pl.col("client_id").is_in(relevant_clients_set)
+            )
+            self.df_labels = self.df_labels.sort("client_id")
         else:
             self.df_labels = None
 
