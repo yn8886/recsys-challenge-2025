@@ -12,11 +12,11 @@ label_split:
   train:
     input_start_datetime: "2022-10-13 00:00:00"
     input_end_datetime: "2022-10-27 00:00:00"
-    input_path: ../dataset/ubc_data_tiny/target/train_target.parquet
+    target_path: ../dataset/ubc_data_tiny/target/train_target.parquet
   valid:
     input_start_datetime: "2022-10-27 00:00:00"
     input_end_datetime: "2022-11-10 00:00:00"
-    input_path: ../dataset/ubc_data_tiny/target/validation_target.parquet
+    target_path: ../dataset/ubc_data_tiny/target/validation_target.parquet
 
 path_product_properties: ../dataset/ubc_data_tiny/product_properties.parquet
 
@@ -31,13 +31,10 @@ path_propensity_sku: ../dataset/ubc_data_tiny/target/propensity_sku.npy
 path_propensity_category: ../dataset/ubc_data_tiny/target/propensity_category.npy
 
 mode:
-  local:
-    - rintaro.zip
-    - 313038_local.zip
-  submit:
-    - v4001_sub_embeddings.zip
-    - rintaro.zip
-    - 313038.zip
+  train:
+    - agg.zip
+  valid:
+    - agg.zip
 
 normalize: false
 

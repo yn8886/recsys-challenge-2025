@@ -30,10 +30,6 @@ class StackingModelModule(L.LightningModule):
             self.train_churn_auc = torchmetrics.AUROC(task="binary")
             self.valid_churn_auc = torchmetrics.AUROC(task="binary")
 
-        if "churn_cart" in tasks:
-            self.train_churn_cart_auc = torchmetrics.AUROC(task="binary")
-            self.valid_churn_cart_auc = torchmetrics.AUROC(task="binary")
-
         if "propensity_sku" in tasks:
             assert num_propensity_sku is not None
             self.train_propensity_sku_auc = torchmetrics.AUROC(
@@ -55,32 +51,6 @@ class StackingModelModule(L.LightningModule):
                 average="macro",
             )
             self.valid_propensity_category_auc = torchmetrics.AUROC(
-                task="multilabel",
-                num_labels=num_propensity_category,
-                average="macro",
-            )
-
-        if "cart_sku" in tasks:
-            assert num_propensity_sku is not None
-            self.train_cart_sku_auc = torchmetrics.AUROC(
-                task="multilabel",
-                num_labels=num_propensity_sku,
-                average="macro",
-            )
-            self.valid_cart_sku_auc = torchmetrics.AUROC(
-                task="multilabel",
-                num_labels=num_propensity_sku,
-                average="macro",
-            )
-
-        if "cart_category" in tasks:
-            assert num_propensity_category is not None
-            self.train_cart_category_auc = torchmetrics.AUROC(
-                task="multilabel",
-                num_labels=num_propensity_category,
-                average="macro",
-            )
-            self.valid_cart_category_auc = torchmetrics.AUROC(
                 task="multilabel",
                 num_labels=num_propensity_category,
                 average="macro",
@@ -116,26 +86,6 @@ class StackingModelModule(L.LightningModule):
             )
             self.log("train_churn_auc", batch_churn_auc, prog_bar=True)
 
-        if "churn_cart" in self.tasks:
-            churn_cart_logits = outputs.churn_cart_logits
-            churn_cart_labels = batch["churn_cart_label"].unsqueeze(-1)
-            churn_cart_loss = F.binary_cross_entropy_with_logits(
-                churn_cart_logits,
-                churn_cart_labels.to(torch.float32),
-                reduction="mean",
-            )
-            loss += churn_cart_loss
-            self.train_churn_cart_auc.update(
-                churn_cart_logits.detach().cpu(),
-                churn_cart_labels.cpu().to(torch.int64),
-            )
-            batch_churn_cart_auc = auroc(
-                churn_cart_logits.detach().cpu(),
-                churn_cart_labels.cpu().to(torch.int64),
-                task="binary",
-            )
-            self.log("train_churn_cart_auc", batch_churn_cart_auc, prog_bar=True)
-
         if "propensity_sku" in self.tasks:
             propensity_sku_logits = outputs.propensity_sku_logits
             propensity_sku_labels = batch["propensity_sku_labels"]
@@ -162,34 +112,6 @@ class StackingModelModule(L.LightningModule):
             self.train_propensity_category_auc.update(
                 propensity_category_logits.detach().cpu(),
                 propensity_category_labels.cpu().to(torch.int64),
-            )
-
-        if "cart_sku" in self.tasks:
-            cart_sku_logits = outputs.cart_sku_logits
-            cart_sku_labels = batch["cart_sku_labels"]
-            cart_sku_loss = F.binary_cross_entropy_with_logits(
-                cart_sku_logits,
-                cart_sku_labels.to(torch.float32),
-                reduction="mean",
-            )
-            loss += cart_sku_loss
-            self.train_cart_sku_auc.update(
-                cart_sku_logits.detach().cpu(),
-                cart_sku_labels.cpu().to(torch.int64),
-            )
-
-        if "cart_category" in self.tasks:
-            cart_category_logits = outputs.cart_category_logits
-            cart_category_labels = batch["cart_category_labels"]
-            cart_category_loss = F.binary_cross_entropy_with_logits(
-                cart_category_logits,
-                cart_category_labels.to(torch.float32),
-                reduction="mean",
-            )
-            loss += cart_category_loss
-            self.train_cart_category_auc.update(
-                cart_category_logits.detach().cpu(),
-                cart_category_labels.cpu().to(torch.int64),
             )
 
         self.train_loss.update(loss.item())
@@ -228,26 +150,6 @@ class StackingModelModule(L.LightningModule):
             )
             self.log("valid_churn_auc", batch_churn_auc, prog_bar=True)
 
-        if "churn_cart" in self.tasks:
-            churn_cart_logits = outputs.churn_cart_logits
-            churn_cart_labels = batch["churn_cart_label"].unsqueeze(-1)
-            churn_cart_loss = F.binary_cross_entropy_with_logits(
-                churn_cart_logits,
-                churn_cart_labels.to(torch.float32),
-                reduction="mean",
-            )
-            loss += churn_cart_loss
-            self.valid_churn_cart_auc.update(
-                churn_cart_logits.detach().cpu(),
-                churn_cart_labels.cpu().to(torch.int64),
-            )
-            batch_churn_cart_auc = auroc(
-                churn_cart_logits.detach().cpu(),
-                churn_cart_labels.cpu().to(torch.int64),
-                task="binary",
-            )
-            self.log("valid_churn_cart_auc", batch_churn_cart_auc, prog_bar=True)
-
         if "propensity_sku" in self.tasks:
             propensity_sku_logits = outputs.propensity_sku_logits
             propensity_sku_labels = batch["propensity_sku_labels"]
@@ -274,34 +176,6 @@ class StackingModelModule(L.LightningModule):
             self.valid_propensity_category_auc.update(
                 propensity_category_logits.detach().cpu(),
                 propensity_category_labels.cpu().to(torch.int64),
-            )
-
-        if "cart_sku" in self.tasks:
-            cart_sku_logits = outputs.cart_sku_logits
-            cart_sku_labels = batch["cart_sku_labels"]
-            cart_sku_loss = F.binary_cross_entropy_with_logits(
-                cart_sku_logits,
-                cart_sku_labels.to(torch.float32),
-                reduction="mean",
-            )
-            loss += cart_sku_loss
-            self.valid_cart_sku_auc.update(
-                cart_sku_logits.detach().cpu(),
-                cart_sku_labels.cpu().to(torch.int64),
-            )
-
-        if "cart_category" in self.tasks:
-            cart_category_logits = outputs.cart_category_logits
-            cart_category_labels = batch["cart_category_labels"]
-            cart_category_loss = F.binary_cross_entropy_with_logits(
-                cart_category_logits,
-                cart_category_labels.to(torch.float32),
-                reduction="mean",
-            )
-            loss += cart_category_loss
-            self.valid_cart_category_auc.update(
-                cart_category_logits.detach().cpu(),
-                cart_category_labels.cpu().to(torch.int64),
             )
 
         self.valid_loss.update(loss.item())
@@ -360,15 +234,6 @@ class StackingModelModule(L.LightningModule):
             )
             self.train_churn_auc.reset()
 
-        if "churn_cart" in self.tasks:
-            self.log(
-                "train_churn_cart_auc",
-                self.train_churn_cart_auc.compute(),
-                prog_bar=False,
-                logger=True,
-            )
-            self.train_churn_cart_auc.reset()
-
         if "propensity_sku" in self.tasks:
             self.log(
                 "train_propensity_sku_auc",
@@ -387,24 +252,6 @@ class StackingModelModule(L.LightningModule):
             )
             self.train_propensity_category_auc.reset()
 
-        if "cart_sku" in self.tasks:
-            self.log(
-                "train_cart_sku_auc",
-                self.train_cart_sku_auc.compute(),
-                prog_bar=False,
-                logger=True,
-            )
-            self.train_cart_sku_auc.reset()
-
-        if "cart_category" in self.tasks:
-            self.log(
-                "train_cart_category_auc",
-                self.train_cart_category_auc.compute(),
-                prog_bar=False,
-                logger=True,
-            )
-            self.train_cart_category_auc.reset()
-
         self._set_state_radam_schedule_free(is_train=False)
 
     def on_validation_epoch_end(self):
@@ -419,15 +266,6 @@ class StackingModelModule(L.LightningModule):
                 logger=True,
             )
             self.valid_churn_auc.reset()
-
-        if "churn_cart" in self.tasks:
-            self.log(
-                "valid_churn_cart_auc",
-                self.valid_churn_cart_auc.compute(),
-                prog_bar=True,
-                logger=True,
-            )
-            self.valid_churn_cart_auc.reset()
 
         if "propensity_sku" in self.tasks:
             self.log(
@@ -447,20 +285,3 @@ class StackingModelModule(L.LightningModule):
             )
             self.valid_propensity_category_auc.reset()
 
-        if "cart_sku" in self.tasks:
-            self.log(
-                "valid_cart_sku_auc",
-                self.valid_cart_sku_auc.compute(),
-                prog_bar=False,
-                logger=True,
-            )
-            self.valid_cart_sku_auc.reset()
-
-        if "cart_category" in self.tasks:
-            self.log(
-                "valid_cart_category_auc",
-                self.valid_cart_category_auc.compute(),
-                prog_bar=False,
-                logger=True,
-            )
-            self.valid_cart_category_auc.reset()

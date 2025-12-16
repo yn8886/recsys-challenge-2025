@@ -6,38 +6,19 @@ from loguru import logger
 
 
 def preprocess(
-    df_product_properties: pl.DataFrame,
-    df_product_buy: pl.DataFrame,
-    df_add_to_cart: pl.DataFrame,
-    df_remove_from_cart: pl.DataFrame,
-    df_page_visit: pl.DataFrame,
-    df_search_query: pl.DataFrame,
-    train_start_datetime: datetime,
-    train_end_datetime: datetime,
-    valid_start_datetime: datetime,
-    valid_end_datetime: datetime,
     arr_relevant_clients: np.ndarray,
     arr_propensity_sku: np.ndarray,
     arr_propensity_category: np.ndarray,
+    df_train_target: pl.DataFrame,
+    df_valid_target: pl.DataFrame,
+
 ):
-    split_data = SplitData(
-        df_product_buy=df_product_buy,
-        df_add_to_cart=df_add_to_cart,
-        df_remove_from_cart=df_remove_from_cart,
-        df_page_visit=df_page_visit,
-        df_search_query=df_search_query,
-        train_start_datetime=train_start_datetime,
-        train_end_datetime=train_end_datetime,
-        valid_start_datetime=valid_start_datetime,
-        valid_end_datetime=valid_end_datetime,
-    )
-    logger.info("Splitting data")
-    df_train_period, df_valid_period = split_data.main()
+    df_train_period = df_train_target
+    df_valid_period = df_valid_target
 
     logger.info("Preprocessing train data")
     train_preprocess_labels = PreprocessLabels(
         df_events=df_train_period,
-        df_product_properties=df_product_properties,
         arr_relevant_clients=arr_relevant_clients,
         arr_propensity_sku=arr_propensity_sku,
         arr_propensity_category=arr_propensity_category,
@@ -47,7 +28,6 @@ def preprocess(
     logger.info("Preprocessing valid data")
     valid_preprocess_labels = PreprocessLabels(
         df_events=df_valid_period,
-        df_product_properties=df_product_properties,
         arr_relevant_clients=arr_relevant_clients,
         arr_propensity_sku=arr_propensity_sku,
         arr_propensity_category=arr_propensity_category,
@@ -260,19 +240,11 @@ class PreprocessLabels:
     def __init__(
         self,
         df_events: pl.DataFrame,
-        df_product_properties: pl.DataFrame,
         arr_relevant_clients: np.ndarray,
         arr_propensity_sku: np.ndarray,
         arr_propensity_category: np.ndarray,
     ) -> None:
-        df_events = df_events.with_columns(pl.col("sku").cast(pl.Int64))
-        df_product_properties = df_product_properties.with_columns(pl.col("sku").cast(pl.Int64))
-        self.df_events = df_events.join(
-            df_product_properties,
-            on="sku",
-            how="left",
-            validate="m:1",
-        )
+        self.df_events = df_events.with_columns(pl.col("sku").cast(pl.Int64))
         self.arr_relevant_clients = np.sort(arr_relevant_clients)
         self.arr_propensity_sku = np.sort(arr_propensity_sku)
         self.arr_propensity_category = np.sort(arr_propensity_category)
@@ -292,7 +264,7 @@ class PreprocessLabels:
         self,
     ):
         arr_active_clients = (
-            self.df_events.filter(pl.col("event_type") == "product_buy")["client_id"]
+            self.df_events["client_id"]
             .unique()
             .to_numpy()
         )
@@ -318,7 +290,7 @@ class PreprocessLabels:
     def add_propensity_sku_labels(
         self,
     ):
-        df_buy_product = self.df_events.filter(pl.col("event_type") == "product_buy")
+        df_buy_product = self.df_events
         positives_nums = []
         for sku in self.arr_propensity_sku:
             propensity_user = (
@@ -342,7 +314,7 @@ class PreprocessLabels:
     def add_propensity_category_labels(
         self,
     ):
-        df_buy_product = self.df_events.filter(pl.col("event_type") == "product_buy")
+        df_buy_product = self.df_events
         positives_nums = []
         for category in self.arr_propensity_category:
             propensity_user = (

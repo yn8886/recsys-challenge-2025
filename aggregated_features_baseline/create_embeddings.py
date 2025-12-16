@@ -46,12 +46,13 @@ def load_product_name_embeddings(product_properties_path: Path) -> dict:
     return sku_to_name_embed
 
 def save_embeddings(
-    embeddings_dir: Path, embeddings: np.ndarray, client_ids: np.ndarray
+    embeddings_dir: Path, embeddings: np.ndarray, client_ids: np.ndarray, mode: str
 ):
     logger.info("Saving embeddings")
-    embeddings_dir.mkdir(parents=True, exist_ok=True)
-    np.save(embeddings_dir / "embeddings.npy", embeddings)
-    np.save(embeddings_dir / "client_ids.npy", client_ids)
+    embeddings_dir = os.path.join(embeddings_dir, mode)
+    os.makedirs(embeddings_dir, exist_ok=True)
+    np.save(os.path.join(embeddings_dir, "embeddings.npy"), embeddings)
+    np.save(os.path.join(embeddings_dir, "client_ids.npy"),  client_ids)
 
 def create_embeddings(
     data_dir: DataDir,
@@ -151,7 +152,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         type=str,
-        default='train',
+        default='valid',
         help="Directory with input and target data – produced by data_utils.split_data",
     )
     parser.add_argument(
@@ -192,6 +193,7 @@ def main(params):
         client_ids=client_ids,
         embeddings=embeddings,
         embeddings_dir=embeddings_dir,
+        mode=params.mode
     )
 
 if __name__ == "__main__":
