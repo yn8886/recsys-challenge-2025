@@ -22,7 +22,6 @@ class UBTTrainer:
     def __init__(self, model, config):
         self.model = model
         self.config = config
-        
         # 检查 CUDA 可用性
         self.use_cuda = torch.cuda.is_available() and self.config.device.startswith("cuda")
         
@@ -49,25 +48,14 @@ class UBTTrainer:
         # 将模型移动到指定设备
         self.model = self.model.to(self.device)
         
-        # 初始化评估指标：流失AUC 与 价格回归 MSE
-        self.metrics = {
-            'churn': BinaryAUROC(),
-        }
-        
-        # 将指标移动到设备
-        for metric in self.metrics.values():
-            metric.to(self.device)
-        
         # 训练状态跟踪
         self.epochs_without_improvement = {
-            'churn_loss': 0,
             'category_loss': 0,
             'product_loss': 0
         }
         
         # 记录最佳损失
         self.best_losses = {
-            'churn_loss': float('inf'),
             'category_loss': float('inf'),
             'product_loss': float('inf')
         }
@@ -76,7 +64,6 @@ class UBTTrainer:
         self.model.train()
         total_loss = 0
         task_losses = {
-            'churn_loss': 0.0,
             'category_loss': 0.0,
             'product_loss': 0.0,
         }
@@ -113,7 +100,7 @@ class UBTTrainer:
                 
                 loss = outputs['loss']
                 # 每个batch输出三个任务的损失
-                logger.info(f"batch {batch_idx} losses: churn_loss={outputs['churn_loss'].item():.4f}, category_loss={outputs['category_loss'].item():.4f}, product_loss={outputs['product_loss'].item():.4f}, total_loss={loss.item():.4f}")
+                logger.info(f"batch {batch_idx} losses: category_loss={outputs['category_loss'].item():.4f}, product_loss={outputs['product_loss'].item():.4f}, total_loss={loss.item():.4f}")
                 
                 # 记录各任务损失
                 for task in task_losses.keys():
@@ -166,16 +153,10 @@ class UBTTrainer:
         self.model.eval()
         total_loss = 0
         task_losses = {
-            'churn_loss': 0.0,
             'category_loss': 0.0,
             'product_loss': 0.0,
         }
         total_samples = 0
-        
-        # 收集预测/标签，用于计算指标
-        task_metrics = {
-            'churn': {'preds': [], 'targets': []},
-        }
         
         # 排序指标收集
         category_recalls = []
@@ -211,23 +192,17 @@ class UBTTrainer:
                 total_samples += batch['client_id'].size(0)
                 
                 # 记录各任务损失
-                for task in ['churn_loss','category_loss','product_loss']:
+                for task in ['category_loss','product_loss']:
                     if task in outputs:
                         task_losses[task] += outputs[task].item() * batch['client_id'].size(0)
-                
-                # 仅收集 churn 预测用于 AUC
-                preds = outputs['task_outputs'].get('churn', None)
-                if preds is not None:
-                    preds = torch.sigmoid(torch.clamp(preds, min=-10, max=10))
-                    task_metrics['churn']['preds'].append(preds.detach().cpu())
-                    task_metrics['churn']['targets'].append(batch['churn'].detach().cpu())
+
                 # 计算类别和商品的排序指标
                 user_embs = outputs['user_embedding']  # (B, D)
                 user_embs = F.normalize(user_embs, p=2, dim=-1)
                 batch_size = user_embs.size(0)
                 for i in range(batch_size):
                     # 类别排序
-                    pos_ids = batch['cats_in_target'][i]
+                    pos_ids = batch['pos_cat_ids'][i]
                     neg_ids = batch['neg_cat_ids'][i]
                     if isinstance(pos_ids, list) and len(pos_ids) > 0:
                         pos_tensor = torch.tensor(pos_ids, dtype=torch.long, device=self.device)
@@ -255,7 +230,7 @@ class UBTTrainer:
                         ndcg = dcg / idcg if idcg > 0 else 0.0
                         category_ndcgs.append(ndcg)
                     # 商品排序
-                    pos_ids = batch['skus_in_target'][i]
+                    pos_ids = batch['pos_sku_ids'][i]
                     neg_ids = batch['neg_sku_ids'][i]
                     if isinstance(pos_ids, list) and len(pos_ids) > 0:
                         pos_tensor = torch.tensor(pos_ids, dtype=torch.long, device=self.device)
@@ -287,15 +262,9 @@ class UBTTrainer:
         metrics = {'val_loss': total_loss / total_samples if total_samples > 0 else float('inf')}
         
         # 添加任务损失到指标（price_loss按有效样本数平均）
-        metrics['churn_loss'] = task_losses['churn_loss']/total_samples if total_samples>0 else float('inf')
         metrics['category_loss'] = task_losses['category_loss']/total_samples if total_samples>0 else float('inf')
         metrics['product_loss'] = task_losses['product_loss']/total_samples if total_samples>0 else float('inf')
-        
-        # churn AUC
-        if task_metrics['churn']['preds']:
-            preds = torch.cat(task_metrics['churn']['preds'])
-            targets = torch.cat(task_metrics['churn']['targets'])
-            metrics['churn_auc'] = self.metrics['churn'](preds, targets).item()
+
         
         # 添加排序指标
         metrics['category_recall@20'] = sum(category_recalls)/len(category_recalls) if category_recalls else 0.0
@@ -309,10 +278,6 @@ class UBTTrainer:
         """训练模型"""
         best_val_loss = float('inf')
         patience_counter = 0
-        # 记录最佳指标，churn_auc 越高越好，price_mse 越低越好
-        best_task_metrics = {
-            'churn_auc': 0.0,
-        }
         
         for epoch in range(self.config.num_epochs):
             logger.info(f"Epoch {epoch+1}/{self.config.num_epochs}")
@@ -335,13 +300,6 @@ class UBTTrainer:
                         else:
                             self.epochs_without_improvement[task] += 1
                             logger.info(f"{task} no improvement for {self.epochs_without_improvement[task]} epochs")
-                
-                # 记录最佳任务指标
-                for metric_name in best_task_metrics:
-                    if metric_name in val_metrics:
-                        if val_metrics[metric_name] > best_task_metrics[metric_name]:
-                            best_task_metrics[metric_name] = val_metrics[metric_name]
-                            logger.info(f"New best {metric_name}: {best_task_metrics[metric_name]:.4f}")
                 
                 # 更新学习率
                 self.scheduler.step(val_loss)
@@ -391,14 +349,14 @@ class UBTTrainer:
                 
                 # 前向传播
                 try:
-                    outputs = self.model(batch)
+                    user_embedding = self.model(batch, only_infer=True)
                     
                     # 检查输出是否有NaN
-                    if torch.isnan(outputs['user_embedding']).any():
+                    if torch.isnan(user_embedding).any():
                         continue
                     
                     # 收集用户表示和ID，将 embedding 转 float16
-                    emb_fp16 = outputs['user_embedding'].half().cpu().numpy()
+                    emb_fp16 = user_embedding.half().cpu().numpy()
                     embeddings.append(emb_fp16)
                     client_ids.append(batch['client_id'].cpu().numpy())
                 except Exception as e:

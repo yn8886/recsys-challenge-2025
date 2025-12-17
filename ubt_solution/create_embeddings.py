@@ -6,27 +6,39 @@ import numpy as np
 import random
 import torch
 from tqdm import tqdm
+from torch.utils.data._utils.collate import default_collate
 from config import Config
 from trainer import UBTTrainer
-from data_processor import create_data_loaders
+from torch.utils.data import DataLoader
 from model import UniversalBehavioralTransformer
 from dataclasses import asdict
-
+from train import RecsysDatasetV12
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def custom_collate(batch):
+    out = {}
+    sample = batch[0]
+    for k in sample:
+        if k in ('pos_sku_ids', 'pos_cat_ids'):
+            out[k] = [b[k] for b in batch]
+        else:
+            out[k] = default_collate([b[k] for b in batch])
+    return out
+
 
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate user embeddings using trained UBT model.")
     parser.add_argument(
         "--data-dir",
         type=str,
-        default='../dataset/ubc_data_tiny/',
+        default='../dataset/',
         help="Directory where input data are stored",
     )
     parser.add_argument(
         "--embeddings-dir",
         type=str,
-        default='../submit/ubt_emb/train/',
+        default='../submit/ubt_emb/',
         help="Directory to save generated embeddings",
     )
     parser.add_argument(
@@ -38,7 +50,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         type=str,
-        default='train_infer',
+        default='train',
     )
     parser.add_argument(
         "--accelerator",
@@ -79,12 +91,12 @@ def get_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def save_embeddings(embeddings_dir: Path, client_ids: np.ndarray, embeddings: np.ndarray):
+def save_embeddings(embeddings_dir: Path, mode, client_ids: np.ndarray, embeddings: np.ndarray):
     logger.info("Saving embeddings...")
-    embeddings_dir.mkdir(parents=True, exist_ok=True)
-    np.save(embeddings_dir / "embeddings.npy", embeddings)
-    np.save(embeddings_dir / "client_ids.npy", client_ids)
-    logger.info(f"Saved embeddings ({embeddings.shape}) and client_ids ({client_ids.shape}) to {embeddings_dir}")
+    embeddings_dir = os.path.join(embeddings_dir, mode)
+    os.makedirs(embeddings_dir, exist_ok=True)
+    np.save(os.path.join(embeddings_dir, "embeddings.npy"), embeddings)
+    np.save(os.path.join(embeddings_dir, "client_ids.npy"), client_ids)
 
 
 def main():
@@ -97,6 +109,7 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
     logger.info(f"Using device: {args.accelerator}")
     device = f"cuda:{args.devices}" if args.accelerator == "cuda" else "cpu"
+    data_dir = Path(args.data_dir)
     config = Config(
         batch_size=args.batch_size,
         num_epochs=1,
@@ -110,12 +123,26 @@ def main():
 
     logger.info(f"Config: {asdict(config)}")
 
-    infer_loader = create_data_loaders(
-        data_dir=Path(args.data_dir),
-        config=config,
-        mode=args.mode,
-        test_mode=args.test_mode
-    )
+    if args.mode == "train":
+        train_dataset = RecsysDatasetV12(data_dir=data_dir, mode='train', test_mode=True, max_len=config.max_seq_length)
+        infer_loader = DataLoader(
+            train_dataset,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            pin_memory=True,
+            shuffle=False,
+            collate_fn=custom_collate
+        )
+    else:
+        valid_dataset = RecsysDatasetV12(data_dir=data_dir, mode='valid', test_mode=True, max_len=config.max_seq_length)
+        infer_loader = DataLoader(
+            valid_dataset,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            pin_memory=True,
+            shuffle=False,
+            collate_fn=custom_collate
+        )
 
     model = UniversalBehavioralTransformer(config)
 
@@ -133,7 +160,7 @@ def main():
         logger.error("No valid embeddings generated!")
         return
 
-    save_embeddings(Path(args.embeddings_dir), client_ids, embeddings)
+    save_embeddings(args.embeddings_dir, args.mode, client_ids, embeddings)
     logger.info("Embedding generation completed successfully.")
 
 

@@ -6,10 +6,12 @@ import numpy as np
 import polars as pl
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
+import json
 
 DATASET_DIR = "../dataset/ubc_data_tiny"
 
 SAVE_DIR = "../dataset/mtl"
+MAPPING_DIR = os.path.join(SAVE_DIR, "mappings")
 TRAIN_DIR = os.path.join(DATASET_DIR, "train")
 VALID_DIR = os.path.join(DATASET_DIR, "valid")
 TARGET_DIR = os.path.join(DATASET_DIR, "target")
@@ -293,126 +295,65 @@ def save_dataframe(df, save_dir):
         save_path = os.path.join(save_dir, file_name)
         np.save(save_path, array)
 
-
-def create_positive_negative_samples(
+def create_positive_samples(
         agg_product_buy_df: pl.DataFrame,
         all_client_ids: np.ndarray,
         sku2id_mapping: dict,
-        propensity_sku_original: np.ndarray,
-        propensity_cat_original: np.ndarray,
         product_prop_df: pl.DataFrame,
-        num_negatives: int = 40,
+        dataset_type
 ) :
+    SKU_CATID_MAPPING_PATH = os.path.join(MAPPING_DIR, "sku2catid_mapping.json")
     buy_map = {row["client_id"]: row["buy_sku"] for row in agg_product_buy_df.iter_rows(named=True)}
 
-    all_sku_ids = product_prop_df["sku_id"].unique().to_numpy()
-    all_sku_set = set(all_sku_ids)
-    all_cat_ids = product_prop_df["category_id"].unique().to_numpy()
-    all_cat_set = set(all_cat_ids)
+    if dataset_type == 'train':
+        print("Generatng SKU Mapping (Train Mode)...")
+        sku_to_cat_map = \
+            product_prop_df.select(['sku', pl.col("category_id")]).unique().to_pandas().set_index(
+                'sku')['category_id'].to_dict()
 
-    sku_to_cat_map = \
-        product_prop_df.select(['sku', pl.col("category_id")]).unique().to_pandas().set_index(
-            'sku')['category_id'].to_dict()
+        with open(SKU_CATID_MAPPING_PATH, 'w') as f:
+            json.dump(sku_to_cat_map, f)
+    else:
+        print("Loading SKU Mapping (Valid Mode)...")
+        if not os.path.exists(SKU_CATID_MAPPING_PATH):
+            raise FileNotFoundError(
+                f"Mapping file not found at {SKU_CATID_MAPPING_PATH}. Please run with --dataset_type train first.")
 
-    propensity_sku_mapped = [sku2id_mapping.get(sku, 2) for sku in propensity_sku_original]
-    propensity_sku_ids = [sku_id for sku_id in propensity_sku_mapped if sku_id >= 3]
+        with open(SKU_CATID_MAPPING_PATH, 'r') as f:
+            sku_to_cat_map = json.load(f)
 
-    propensity_cat_ids = [cat + 2 for cat in propensity_cat_original]
 
     client_ids = []
     pos_sku_ids_list = []
-    neg_sku_ids_list = []
     pos_cat_ids_list = []
-    neg_cat_ids_list = []
-    is_churn_list = []
 
     for client_id in tqdm(all_client_ids, desc="Creating Pos/Neg/Churn Samples"):
         buy_sku_original = buy_map.get(client_id)
 
-        # 确定正例 (Positives)
         if buy_sku_original is not None and len(buy_sku_original) > 0:
-            is_churn = 0
             pos_sku_ids_mapped = [sku2id_mapping.get(sku, 2) for sku in buy_sku_original]
             pos_sku_ids = list(set([sku_id for sku_id in pos_sku_ids_mapped if sku_id >= 3]))
-
-            # 计算正例类别 ID
-            pos_cat_ids_mapped = [sku_to_cat_map.get(sku_id, 2) for sku_id in pos_sku_ids]
+            pos_cat_ids_mapped = [sku_to_cat_map.get(sku_id, 2) for sku_id in buy_sku_original]
             pos_cat_ids = list(set([cat_id for cat_id in pos_cat_ids_mapped if cat_id >= 3]))
         else:
-            is_churn = 1
             pos_sku_ids = []
             pos_cat_ids = []
 
-        pos_sku_set = set(pos_sku_ids)
-        pos_cat_set = set(pos_cat_ids)
-
-        neg_sku_ids = []
-
-        for sku_id in propensity_sku_ids:
-            if sku_id not in pos_sku_set:
-                neg_sku_ids.append(sku_id)
-                if len(neg_sku_ids) >= num_negatives:
-                    break
-
-        if len(neg_sku_ids) < num_negatives:
-            remaining_negatives_needed = num_negatives - len(neg_sku_ids)
-            available_for_sampling = list(all_sku_set - pos_sku_set - set(neg_sku_ids))
-
-            if available_for_sampling:
-                num_to_sample = min(remaining_negatives_needed, len(available_for_sampling))
-                new_neg_sku_ids = np.random.choice(
-                    available_for_sampling,
-                    size=num_to_sample,
-                    replace=False
-                ).tolist()
-                neg_sku_ids.extend(new_neg_sku_ids)
-
-        neg_cat_ids = []
-
-        for cat_id in propensity_cat_ids:
-            if cat_id not in pos_cat_set:
-                neg_cat_ids.append(cat_id)
-                if len(neg_cat_ids) >= num_negatives:
-                    break
-
-        if len(neg_cat_ids) < num_negatives:
-            remaining_negatives_needed = num_negatives - len(neg_cat_ids)
-            available_for_sampling = list(all_cat_set - pos_cat_set - set(neg_cat_ids))
-
-            if available_for_sampling:
-                num_to_sample = min(remaining_negatives_needed, len(available_for_sampling))
-                new_neg_cat_ids = np.random.choice(
-                    available_for_sampling,
-                    size=num_to_sample,
-                    replace=False
-                ).tolist()
-                neg_cat_ids.extend(new_neg_cat_ids)
-
         client_ids.append(client_id)
         pos_sku_ids_list.append(pos_sku_ids)
-        neg_sku_ids_list.append(neg_sku_ids)
         pos_cat_ids_list.append(pos_cat_ids)
-        neg_cat_ids_list.append(neg_cat_ids)
-        is_churn_list.append(is_churn)
 
 
     data = {
         "client_id": client_ids,
         "pos_sku_ids": pos_sku_ids_list,
-        "neg_sku_ids": neg_sku_ids_list,
         "pos_cat_ids": pos_cat_ids_list,
-        "neg_cat_ids": neg_cat_ids_list,
-        "is_churn": is_churn_list,
-
     }
 
     schema = {
         "client_id": pl.Int64,
         "pos_sku_ids": pl.List(pl.Int64),
-        "neg_sku_ids": pl.List(pl.Int64),
         "pos_cat_ids": pl.List(pl.Int64),
-        "neg_cat_ids": pl.List(pl.Int64),
-        "is_churn": pl.Int32,
     }
 
     label_df = pl.from_dict(data=data, schema=schema)
@@ -431,6 +372,11 @@ def main():
     dataset_type = args.dataset_type
     INPUT_DIR = TRAIN_DIR if dataset_type == 'train' else VALID_DIR
 
+    os.makedirs(MAPPING_DIR, exist_ok=True)
+    SKU_MAPPING_PATH = os.path.join(MAPPING_DIR, "sku2id_mapping.json")
+    URL_MAPPING_PATH = os.path.join(MAPPING_DIR, "url2id_mapping.json")
+
+
     # 1. Load ubc_data
     relevant_client_ids = np.load(os.path.join(DATASET_DIR, "relevant_clients.npy"))
     candidate_sku = np.load(os.path.join(TARGET_DIR, "propensity_sku.npy"))
@@ -440,15 +386,15 @@ def main():
     )
     add_to_cart_df = pl.read_parquet(os.path.join(INPUT_DIR, "add_to_cart.parquet"))
     add_to_cart_df = filter_by_client_id(add_to_cart_df, relevant_client_ids)
-    page_visit_df = pl.read_parquet(os.path.join(DATASET_DIR, "page_visit.parquet"))
+    page_visit_df = pl.read_parquet(os.path.join(INPUT_DIR, "page_visit.parquet"))
     page_visit_df = filter_by_client_id(page_visit_df, relevant_client_ids)
-    product_buy_df = pl.read_parquet(os.path.join(DATASET_DIR, "product_buy.parquet"))
+    product_buy_df = pl.read_parquet(os.path.join(INPUT_DIR, "product_buy.parquet"))
     product_buy_df = filter_by_client_id(product_buy_df, relevant_client_ids)
     remove_from_cart_df = pl.read_parquet(
-        os.path.join(DATASET_DIR, "remove_from_cart.parquet")
+        os.path.join(INPUT_DIR, "remove_from_cart.parquet")
     )
     remove_from_cart_df = filter_by_client_id(remove_from_cart_df, relevant_client_ids)
-    search_query_df = pl.read_parquet(os.path.join(DATASET_DIR, "search_query.parquet"))
+    search_query_df = pl.read_parquet(os.path.join(INPUT_DIR, "search_query.parquet"))
     search_query_df = filter_by_client_id(search_query_df, relevant_client_ids)
 
     # 2. make user stats data
@@ -522,10 +468,23 @@ def main():
     # 3. Mapping original id
     # Mapping starts from 3 (PAD_IDX=0, MASK=1, UNK=2)
     start_id = 3
-    mapping_skus = np.sort(product_prop_df["sku"].unique().to_numpy())
-    sku2id_mapping = {
-        sku_id: i for i, sku_id in enumerate(mapping_skus, start=start_id)
-    }
+    if dataset_type == 'train':
+        print("Generatng SKU Mapping (Train Mode)...")
+        mapping_skus = np.sort(product_prop_df["sku"].unique().to_numpy())
+        sku2id_mapping = {int(sku_id): i for i, sku_id in enumerate(mapping_skus, start=start_id)}
+
+        with open(SKU_MAPPING_PATH, 'w') as f:
+            json.dump(sku2id_mapping, f)
+    else:
+        print("Loading SKU Mapping (Valid Mode)...")
+        if not os.path.exists(SKU_MAPPING_PATH):
+            raise FileNotFoundError(
+                f"Mapping file not found at {SKU_MAPPING_PATH}. Please run with --dataset_type train first.")
+
+        with open(SKU_MAPPING_PATH, 'r') as f:
+            loaded_sku_map = json.load(f)
+            sku2id_mapping = {int(k): v for k, v in loaded_sku_map.items()}
+
     product_buy_df = product_buy_df.with_columns(
         pl.col("sku").replace(sku2id_mapping, default=2).alias("sku_id")
     )
@@ -537,22 +496,35 @@ def main():
     )
 
     # Mapping starts from 3 (PAD_IDX=0, MASK=1, UNK=2)
-    pv_for_mapping_df = pl.read_parquet(os.path.join(DATASET_DIR, "page_visit.parquet"))
-    pv_for_mapping_df = pv_for_mapping_df.filter(
-        pl.col("client_id").is_in(relevant_client_ids)
-    )
+    if dataset_type == 'train':
+        print("Generating URL Mapping (Train Mode)...")
+        pv_for_mapping_df = pl.read_parquet(os.path.join(DATASET_DIR, "page_visit.parquet"))
+        pv_for_mapping_df = pv_for_mapping_df.filter(
+            pl.col("client_id").is_in(relevant_client_ids)
+        )
 
-    MIN_CNT = 10
-    url_count_df = pv_for_mapping_df.group_by("url").len("count")
-    mapping_urls = url_count_df.filter(pl.col("count") >= MIN_CNT)["url"].to_numpy()
-    mapping_urls = np.sort(mapping_urls)
-    url2id_mapping = {
-        url_id: i for i, url_id in enumerate(mapping_urls, start=start_id)
-    }
+        MIN_CNT = 10
+        url_count_df = pv_for_mapping_df.group_by("url").len("count")
+        mapping_urls = url_count_df.filter(pl.col("count") >= MIN_CNT)["url"].to_numpy()
+        mapping_urls = np.sort(mapping_urls)
+
+        url2id_mapping = {int(url_id): i for i, url_id in enumerate(mapping_urls, start=start_id)}
+
+        with open(URL_MAPPING_PATH, 'w') as f:
+            json.dump(url2id_mapping, f)
+        del pv_for_mapping_df
+    else:
+        print("Loading URL Mapping (Valid Mode)...")
+        if not os.path.exists(URL_MAPPING_PATH):
+            raise FileNotFoundError(
+                f"Mapping file not found at {URL_MAPPING_PATH}. Please run with --dataset_type train first.")
+
+        with open(URL_MAPPING_PATH, 'r') as f:
+            loaded_url_map = json.load(f)
+            url2id_mapping = {int(k): v for k, v in loaded_url_map.items()}
     page_visit_df = page_visit_df.with_columns(
         pl.col("url").replace(url2id_mapping, default=2).alias("url_id")
     )
-    del pv_for_mapping_df
 
     product_prop_df = product_prop_df.with_columns(
         pl.col("sku").replace(sku2id_mapping, default=2).alias("sku_id"),
@@ -675,14 +647,16 @@ def main():
         ]
     )
 
+    all_df = input_df.join(stats_df, on="client_id", how="inner")
+    all_df = all_df.sort(by="client_id")
+    save_dir = os.path.join(SAVE_DIR, dataset_type)
+    save_dataframe(all_df, save_dir)
+
     # 4. Create target data
     if dataset_type == 'train':
         product_buy_target_df = pl.read_parquet(os.path.join(TARGET_DIR, "train_target.parquet"))
     else:
         product_buy_target_df = pl.read_parquet(os.path.join(TARGET_DIR, "validation_target.parquet"))
-
-    candidate_sku = np.load(os.path.join(TARGET_DIR, "propensity_sku.npy"))
-    candidate_cat = np.load(os.path.join(TARGET_DIR, "propensity_category.npy"))
 
     target_df = product_buy_target_df.group_by("client_id").agg(
         pl.col("sku").alias("buy_sku"),
@@ -735,34 +709,36 @@ def main():
     }
 
     label_df = pl.from_dicts(data=data, schema=schema)
-
-    input_df = input_df.join(label_df, on="client_id", how="inner")
-
-    label_df = create_positive_negative_samples(
-        target_df,
-        relevant_client_ids,
-        sku2id_mapping,
-        candidate_sku,
-        candidate_cat,
-        product_prop_df,
-        num_negatives=120,
-    )
-
     all_df = input_df.join(label_df, on="client_id", how="inner")
 
     all_df = all_df.with_columns(
-        pl.col("pos_sku_ids").fill_null(pl.lit([])).alias("pos_sku_ids"),
-        pl.col("neg_sku_ids").fill_null(pl.lit([])).alias("neg_sku_ids"),
-        pl.col("pos_cat_ids").fill_null(pl.lit([])).alias("pos_cat_ids"),
-        pl.col("neg_cat_ids").fill_null(pl.lit([])).alias("neg_cat_ids"),
+        pl.col("contain_buy_sku_label").is_null().cast(pl.Int32).alias("is_churn"),
+        pl.col("buy_sku_label").fill_null(pl.lit([0] * 100)),
+        pl.col("buy_cat_label").fill_null(pl.lit([0] * 100)),
+        pl.col("contain_buy_sku_label").fill_null(pl.lit(0)),
+        pl.col("contain_buy_cat_label").fill_null(pl.lit(0)),
     )
 
+    label_df = create_positive_samples(
+        target_df,
+        relevant_client_ids,
+        sku2id_mapping,
+        product_prop_df,
+        dataset_type
+    )
+
+    all_df = all_df.join(label_df, on="client_id", how="inner")
+
+    all_df = all_df.with_columns(
+        pl.col("pos_sku_ids").fill_null(pl.lit([])).alias("pos_sku_ids"),
+        pl.col("pos_cat_ids").fill_null(pl.lit([])).alias("pos_cat_ids"),
+    )
 
     all_df = all_df.join(stats_df, on="client_id", how="inner")
     all_df = all_df.sort(by="client_id")
     del input_df, label_df, stats_df
 
-    save_dir = os.path.join(SAVE_DIR, dataset_type)
+    save_dir = os.path.join('./dataset', dataset_type)
     save_dataframe(all_df, save_dir)
 
 

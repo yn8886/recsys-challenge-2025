@@ -334,7 +334,7 @@ class FeaturesAggregator:
         
         client_ids = []
         embeddings = []
-        for client_id in tqdm(self._aggregated_features.keys()):
+        for client_id in tqdm(sorted(self._aggregated_features.keys())):
             client_ids.append(client_id)
             embeddings_for_client: List[np.ndarray] = []
             for event_type in EVENT_TYPE_TO_COLUMNS.keys():

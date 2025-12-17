@@ -298,9 +298,6 @@ class UniversalBehavioralTransformer(L.LightningModule):
         self.fusion_mlp_input_dim = self.d_model + config.static_features_dim
         self.lr = config.learning_rate
 
-        # 加载 active_clients，用于限制 churn 损失计算
-        active_clients_np = np.load('../dataset/ubc_data_tiny/target/active_clients.npy')
-        self.register_buffer('active_client_ids', torch.from_numpy(active_clients_np).long())
 
         self.encoder = EnhancedFeatureEncoder(config, self.dtype)
 
@@ -343,7 +340,6 @@ class UniversalBehavioralTransformer(L.LightningModule):
             dropout=config.fusion_mlp_dropout,
         )
 
-        self.task_encoder = TaskSpecificEncoder(config)
         self.category_embeddings = self.encoder.item_emb_layer.cat_emb_layer[0]
         self.sku_embeddings = nn.Sequential(
             self.encoder.item_emb_layer.sku_emb_layer[0],
@@ -351,7 +347,6 @@ class UniversalBehavioralTransformer(L.LightningModule):
         )
 
         self.register_buffer('task_weights', torch.tensor([
-            config.task_weights['churn'],
             config.task_weights['category_propensity'],
             config.task_weights['product_propensity']
         ]))
@@ -364,7 +359,7 @@ class UniversalBehavioralTransformer(L.LightningModule):
         self.propensity_positive_sample_weight_boost = config.propensity_positive_sample_weight_boost
 
 
-    def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, batch: Dict[str, torch.Tensor], only_infer=False) -> Dict[str, torch.Tensor]:
         device = next(self.parameters()).device
 
         for key in batch:
@@ -395,24 +390,10 @@ class UniversalBehavioralTransformer(L.LightningModule):
         )
         user_embeddings = self.fusion_mlp(concat_feat)
 
-        task_outputs = self.task_encoder(user_embeddings)
+        if only_infer:
+            return user_embeddings
 
         losses = {}
-
-        # churn 任务损失：仅对 active clients 计算
-        client_ids = batch['client_id']
-        active_mask = torch.isin(client_ids, self.active_client_ids)
-        churn_logits = task_outputs['churn'].squeeze()
-        churn_targets = batch['is_churn'].float()
-        pos_w = torch.tensor(self.pos_weight, device=device) if churn_targets.sum() > 0 else None
-        per_sample_churn_loss = F.binary_cross_entropy_with_logits(
-            churn_logits, churn_targets, pos_weight=pos_w, reduction='none'
-        )
-        if active_mask.any():
-            churn_loss = per_sample_churn_loss[active_mask].mean()
-        else:
-            churn_loss = torch.tensor(0.0, device=device)
-        losses['churn_loss'] = churn_loss
 
         self.temperature = 0.07
         # 多正样本 NCE 损失：类别
@@ -454,21 +435,17 @@ class UniversalBehavioralTransformer(L.LightningModule):
             product_loss = torch.tensor(0.0, device=device)
         losses['product_loss'] = product_loss
 
-        # 加入各任务的加权损失
-        cw, catw, pw = self.task_weights
-        weighted_churn = cw * churn_loss
+        catw, pw = self.task_weights
         weighted_category = catw * category_loss
         weighted_product = pw * product_loss
-        losses['weighted_churn_loss'] = weighted_churn
         losses['weighted_category_loss'] = weighted_category
         losses['weighted_product_loss'] = weighted_product
-        total_loss = weighted_churn + weighted_category + weighted_product
+        total_loss = weighted_category + weighted_product
         total_loss = total_loss
         losses['loss'] = total_loss * self.loss_scale
 
         return {
             'user_embedding': user_embeddings,
-            'task_outputs': task_outputs,
             **losses
         }
 
