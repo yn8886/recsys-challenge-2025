@@ -146,13 +146,13 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir",
         type=str,
-        default='../dataset/ubc_data/',
+        default='../dataset/ubc_data_tiny/',
         help="Directory with input and target data – produced by data_utils.split_data",
     )
     parser.add_argument(
         "--mode",
         type=str,
-        default='valid',
+        default='train',
         help="Directory with input and target data – produced by data_utils.split_data",
     )
     parser.add_argument(

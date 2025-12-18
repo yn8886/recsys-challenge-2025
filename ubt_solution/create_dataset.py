@@ -333,15 +333,12 @@ def create_positive_samples(
         if buy_sku_original is not None and len(buy_sku_original) > 0:
             pos_sku_ids_mapped = [sku2id_mapping.get(sku, 2) for sku in buy_sku_original]
             pos_sku_ids = list(set([sku_id for sku_id in pos_sku_ids_mapped if sku_id >= 3]))
-            pos_cat_ids_mapped = [sku_to_cat_map.get(sku_id, 2) for sku_id in buy_sku_original]
-            pos_cat_ids = list(set([cat_id for cat_id in pos_cat_ids_mapped if cat_id >= 3]))
-        else:
-            pos_sku_ids = []
-            pos_cat_ids = []
+            pos_cat_ids_mapped = [sku_to_cat_map.get(sku) for sku in buy_sku_original]
+            pos_cat_ids = list(set([cat_id for cat_id in pos_cat_ids_mapped if cat_id >= 2]))
 
-        client_ids.append(client_id)
-        pos_sku_ids_list.append(pos_sku_ids)
-        pos_cat_ids_list.append(pos_cat_ids)
+            client_ids.append(client_id)
+            pos_sku_ids_list.append(pos_sku_ids)
+            pos_cat_ids_list.append(pos_cat_ids)
 
 
     data = {
@@ -364,7 +361,7 @@ def main():
     parser.add_argument(
         "--dataset_type",
         type=str,
-        default="valid",
+        default="train",
         choices=["train", "valid"],
     )
 
@@ -571,13 +568,13 @@ def main():
     add_to_cart_df = add_to_cart_df.join(product_prop_df, on="sku_id", how="inner")
     add_to_cart_df = add_to_cart_df.with_columns(
         pl.lit(EventType.ADD_TO_CART.value).alias("event_type"),
-        pl.lit(-1).alias("url_id").cast(pl.Int64),
+        pl.lit(0).alias("url_id").cast(pl.Int64),
     ).select(target_cols)
 
     product_buy_df = product_buy_df.join(product_prop_df, on="sku_id", how="inner")
     product_buy_df = product_buy_df.with_columns(
         pl.lit(EventType.PRODUCT_BUY.value).alias("event_type"),
-        pl.lit(-1).alias("url_id").cast(pl.Int64),
+        pl.lit(0).alias("url_id").cast(pl.Int64),
     ).select(target_cols)
 
     remove_from_cart_df = remove_from_cart_df.join(
@@ -585,23 +582,23 @@ def main():
     )
     remove_from_cart_df = remove_from_cart_df.with_columns(
         pl.lit(EventType.REMOVE_FROM_CART.value).alias("event_type"),
-        pl.lit(-1).alias("url_id").cast(pl.Int64),
+        pl.lit(0).alias("url_id").cast(pl.Int64),
     ).select(target_cols)
 
     page_visit_df = page_visit_df.with_columns(
         pl.lit(EventType.PAGE_VISIT.value).alias("event_type"),
-        pl.lit(-1).alias("sku_id").cast(pl.Int64),
-        pl.lit([-1] * 16).alias("word_ids"),
-        pl.lit(-1).alias("category_id").cast(pl.Int64),
-        pl.lit(-1).alias("price_id").cast(pl.Int64),
+        pl.lit(0).alias("sku_id").cast(pl.Int64),
+        pl.lit([0] * 16).alias("word_ids"),
+        pl.lit(0).alias("category_id").cast(pl.Int64),
+        pl.lit(0).alias("price_id").cast(pl.Int64),
     ).select(target_cols)
 
     search_query_df = search_query_df.with_columns(
         pl.lit(EventType.SEARCH_QUERY.value).alias("event_type"),
-        pl.lit(-1).alias("sku_id").cast(pl.Int64),
-        pl.lit(-1).alias("url_id").cast(pl.Int64),
-        pl.lit(-1).alias("category_id").cast(pl.Int64),
-        pl.lit(-1).alias("price_id").cast(pl.Int64),
+        pl.lit(0).alias("sku_id").cast(pl.Int64),
+        pl.lit(0).alias("url_id").cast(pl.Int64),
+        pl.lit(0).alias("category_id").cast(pl.Int64),
+        pl.lit(0).alias("price_id").cast(pl.Int64),
     ).select(target_cols)
 
     event_df = pl.concat(
@@ -647,11 +644,6 @@ def main():
         ]
     )
 
-    all_df = input_df.join(stats_df, on="client_id", how="inner")
-    all_df = all_df.sort(by="client_id")
-    save_dir = os.path.join(SAVE_DIR, dataset_type)
-    save_dataframe(all_df, save_dir)
-
     # 4. Create target data
     if dataset_type == 'train':
         product_buy_target_df = pl.read_parquet(os.path.join(TARGET_DIR, "train_target.parquet"))
@@ -675,12 +667,8 @@ def main():
     for i in tqdm(range(len(target_df))):
         client_id = target_df["client_id"][i]
 
-        if target_df["buy_sku"][i] is None:
-            buy_sku = np.array([-1])
-            buy_cat = np.array([-1])
-        else:
-            buy_sku = target_df["buy_sku"][i].to_numpy()
-            buy_cat = target_df["buy_cat"][i].to_numpy()
+        buy_sku = target_df["buy_sku"][i].to_numpy()
+        buy_cat = target_df["buy_cat"][i].to_numpy()
 
         buy_sku_label = np.isin(sku_candidates, buy_sku).astype(np.int32)
         buy_cat_label = np.isin(cat_candidates, buy_cat).astype(np.int32)
@@ -709,7 +697,7 @@ def main():
     }
 
     label_df = pl.from_dicts(data=data, schema=schema)
-    all_df = input_df.join(label_df, on="client_id", how="inner")
+    all_df = input_df.join(label_df, on="client_id", how="left")
 
     all_df = all_df.with_columns(
         pl.col("contain_buy_sku_label").is_null().cast(pl.Int32).alias("is_churn"),
@@ -718,6 +706,10 @@ def main():
         pl.col("contain_buy_sku_label").fill_null(pl.lit(0)),
         pl.col("contain_buy_cat_label").fill_null(pl.lit(0)),
     )
+    all_df = all_df.join(stats_df, on="client_id", how="inner")
+    all_df = all_df.sort(by="client_id")
+    save_dir = os.path.join(SAVE_DIR, dataset_type)
+    save_dataframe(all_df, save_dir)
 
     label_df = create_positive_samples(
         target_df,
@@ -727,7 +719,7 @@ def main():
         dataset_type
     )
 
-    all_df = all_df.join(label_df, on="client_id", how="inner")
+    all_df = input_df.join(label_df, on="client_id", how="inner")
 
     all_df = all_df.with_columns(
         pl.col("pos_sku_ids").fill_null(pl.lit([])).alias("pos_sku_ids"),
