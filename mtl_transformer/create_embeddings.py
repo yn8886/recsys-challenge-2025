@@ -1,16 +1,11 @@
 import argparse
-import math
 import os
-from datetime import datetime
 from enum import Enum
 import logging
 import lightning as L
 import numpy as np
-import polars as pl
 import torch
 import torch.nn as nn
-from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
-from sympy.utilities.timeutils import timethis
 from torch import Tensor, optim
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics.classification import AUROC
@@ -21,17 +16,12 @@ from models.hstu_modules import (
     SequentialTransductionUnitJagged,
     HSTUJagged,
 )
-
-NUM_CANDIDATES_SKU = 100
-NUM_CANDIDATES_CAT = 100
-NUM_CANDIDATES_PRICE = 100
+from tqdm import tqdm
 
 exp_name = os.path.splitext(os.path.basename(__file__))[0]
 torch.backends.cudnn.benchmark = True
 
 np.random.seed(42)
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 NUM_CANDIDATES_SKU = 100
 NUM_CANDIDATES_CAT = 100
@@ -802,7 +792,7 @@ class LightningRecsysModel(L.LightningModule):
                 logits_buy_cat[mask], label_buy_cat[mask].float()
             )
 
-        logger.info('valid/loss_churn', loss_churn)
+        self.log('valid/loss_churn', loss_churn)
 
         sum_loss = (
             loss_churn
@@ -870,6 +860,15 @@ class LightningRecsysModel(L.LightningModule):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="train",
+        choices=["train", "valid",],
+    )
+    parser.add_argument(
+        "--model_path", type=str, default="./results/weights/epoch=1-step=8.ckpt"
+    )
+    parser.add_argument(
         "--data-dir",
         type=str,
         default='../dataset/mtl',
@@ -923,57 +922,58 @@ def main():
         devices=[int(args.devices)] if args.accelerator == "cuda" else [],
     )
 
-    train_dataset_dir = os.path.join(args.data_dir, "train")
-    valid_dataset_dir = os.path.join(args.data_dir, "valid")
+    model = LightningRecsysModel.load_from_checkpoint(args.model_path)
+    model.eval()
 
-    train_dataset = RecsysDatasetV12(dataset_dir=train_dataset_dir, max_len=config.max_seq_length)
-    valid_dataset = RecsysDatasetV12(dataset_dir=valid_dataset_dir, max_len=config.max_seq_length)
-
-    print(f"train_size : {len(train_dataset)}")
-    print(f"valid_size : {len(valid_dataset)}")
-
-    train_dataloader = DataLoader(
-        train_dataset,
+    dataset_dir = os.path.join(args.data_dir, args.dataset_type)
+    dataset = RecsysDatasetV12(dataset_dir=dataset_dir, max_len=config.max_seq_length)
+    dataloader = DataLoader(
+        dataset,
         batch_size=config.batch_size,
-        num_workers=config.num_workers,
         pin_memory=True,
-        shuffle=True,
-    )
-    valid_dataloader = DataLoader(
-        valid_dataset,
-        batch_size=config.batch_size,
         num_workers=config.num_workers,
-        pin_memory=True,
-        shuffle=True,
+        shuffle=False,
     )
 
-    model = LightningRecsysModel(config)
+    client_ids = []
+    embeddings = []
+    with torch.no_grad():
+        for batch in tqdm(dataloader):
+            client_id = batch["client_id"]
+            statistical_feature = batch["statistical_feature"].to(device)
 
-    save_path = "./results/weights/"
+            # sequence features
+            event_type = batch["event_type"].to(device)
+            sku = batch["sku"].to(device)
+            url = batch["url"].to(device)
+            category = batch["category"].to(device)
+            price = batch["price"].to(device)
+            word = batch["word"].to(device)
+            timestamp = batch["timestamp"].to(device)
+
+            user_emb = model.compute_user_embedding(
+                event_type,
+                sku,
+                url,
+                category,
+                price,
+                word,
+                timestamp,
+                statistical_feature,
+            )
+
+            client_ids.append(client_id)
+            embeddings.append(user_emb.squeeze(1).cpu())
+
+    client_ids = torch.concat(client_ids)
+    embeddings = torch.concat(embeddings)
+    client_ids_npy = np.array(client_ids)
+    embeddings_npy = embeddings.detach().numpy().astype(np.float16)
+
+    save_path = os.path.join(config.output_dir, 'mtl')
     os.makedirs(save_path, exist_ok=True)
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=save_path,
-        monitor="valid/sum_score",
-        save_top_k=3,
-        mode="max",
-        save_weights_only=True,
-    )
-    model_summary = ModelSummary(max_depth=3)
-
-    # wandb_logger = WandbLogger(project="Recsys", name=exp_name, log_model=True)
-
-    trainer = L.Trainer(
-        callbacks=[checkpoint_callback, model_summary],
-        # logger=wandb_logger,
-        accelerator=args.accelerator,
-        max_epochs=config.num_epochs,
-        num_sanity_val_steps=0,
-    )
-    trainer.fit(
-        model,
-        train_dataloader,
-        valid_dataloader,
-    )
+    np.save(os.path.join(save_path, "client_ids.npy"), client_ids_npy)
+    np.save(os.path.join(save_path, "embeddings.npy"), embeddings_npy)
 
 
 if __name__ == "__main__":

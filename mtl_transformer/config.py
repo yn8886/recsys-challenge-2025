@@ -71,8 +71,7 @@ class Config:
     num_workers: int = 0
     # 负采样数量，用于负采样softmax-ce损失
     num_negative_samples: int = 400
-    save_dir: str = "./save"
-    output_dir: str = "./outputs"
+    output_dir: str = "../submit"
     device: str = "cuda:0"
     use_cpu: bool = False  # 添加CPU选项
     
