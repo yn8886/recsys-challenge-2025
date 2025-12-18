@@ -9,22 +9,24 @@ import numpy as np
 import polars as pl
 import torch
 import torch.nn as nn
-# import wandb
-from dotenv import load_dotenv
 from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
-# from lightning.pytorch.loggers import WandbLogger
+from sympy.utilities.timeutils import timethis
 from torch import Tensor, optim
 from torch.utils.data import DataLoader, Dataset
-from torchmetrics.classification import AUROC, MultilabelAccuracy
+from torchmetrics.classification import AUROC
+from config import Config
+from model import EnhancedFeatureEncoder
+from models.hstu_modules import (
+    RelativeBucketedTimeAndPositionBasedBias,
+    SequentialTransductionUnitJagged,
+    HSTUJagged,
+)
 
 NUM_CANDIDATES_SKU = 100
 NUM_CANDIDATES_CAT = 100
 NUM_CANDIDATES_PRICE = 100
 
-BASE_PATH = "../dataset/mtl"
-
 exp_name = os.path.splitext(os.path.basename(__file__))[0]
-device = "cpu"
 torch.backends.cudnn.benchmark = True
 
 np.random.seed(42)
@@ -39,55 +41,6 @@ class EventType(Enum):
     REMOVE_FROM_CART = 4
     PAGE_VISIT = 5
     SEARCH_QUERY = 6
-
-
-class CFG:
-    n_epochs = 3
-    batch_size = 128
-    num_workers = 0
-    num_event = 5 + 2
-    num_sku = 1_260_370
-    num_cat = 6_995
-    num_price = 100 + 2
-    num_url = 373_500
-    num_word = 256 + 3
-    num_day = 365
-    num_week = 52
-    static_features_dim = 46
-    item_emb_dim = 384
-    event_emb_dim = 8
-    sku_emb_dim = 384
-    cat_emb_dim = 96
-    price_emb_dim = 16
-    day_emb_dim = 16
-    week_emb_dim = 4
-    fusion_mlp_hidden_dim = 256
-    fusion_mlp_output_dim = 256
-    fusion_mlp_dropout = 0.01
-    num_shared_experts = 4
-    num_task_experts = 4
-    num_tasks = 8
-    expert_hidden_dims = [256]
-    expert_output_dim = 128
-    task_tower_hidden_dims = [128]
-    task_tower_dropout = 0.1
-    num_heads = 1
-    num_layers = 2
-    dropout = 0.2
-    max_len = 64
-    learning_rate = 1e-3
-    mask_rate = 0.2
-    temperature = 0.1
-    device = "cpu"
-    padding_idx = 0
-    churn_loss_weight = 0.025
-    add_loss_weight = 0.025
-
-
-# def login_wandb():
-#     load_dotenv()
-#     WANDB_API_KEY = os.getenv("WANDB_API_KEY")
-#     wandb.login(key=WANDB_API_KEY)
 
 
 class RecsysDatasetV12(Dataset):
@@ -132,6 +85,10 @@ class RecsysDatasetV12(Dataset):
             os.path.join(self.dataset_dir, "price_id.npy"), allow_pickle=True
         )
 
+        self.timestamps = np.load(
+            os.path.join(self.dataset_dir, "norm_timestamp.npy"), allow_pickle=True
+        )
+
         print("Loading static_features.npy")
         self.statistical_features = np.load(
             os.path.join(self.dataset_dir, "stats_features.npy"), allow_pickle=True
@@ -145,17 +102,19 @@ class RecsysDatasetV12(Dataset):
         self.is_churn = np.load(
             os.path.join(self.dataset_dir, "is_churn.npy"), allow_pickle=True
         )
-        self.pos_sku_ids = np.load(
-            os.path.join(self.dataset_dir, "pos_sku_ids.npy"), allow_pickle=True
+        self.buy_sku_labels = np.load(
+            os.path.join(self.dataset_dir, "buy_sku_label.npy"), allow_pickle=True
         )
-        self.neg_sku_ids = np.load(
-            os.path.join(self.dataset_dir, "neg_sku_ids.npy"), allow_pickle=True
+        self.buy_cat_labels = np.load(
+            os.path.join(self.dataset_dir, "buy_cat_label.npy"), allow_pickle=True
         )
-        self.pos_cat_ids = np.load(
-            os.path.join(self.dataset_dir, "pos_sku_ids.npy"), allow_pickle=True
+        self.contain_buy_sku_labels = np.load(
+            os.path.join(self.dataset_dir, "contain_buy_sku_label.npy"),
+            allow_pickle=True,
         )
-        self.neg_cat_ids = np.load(
-            os.path.join(self.dataset_dir, "neg_sku_ids.npy"), allow_pickle=True
+        self.contain_buy_cat_labels = np.load(
+            os.path.join(self.dataset_dir, "contain_buy_cat_label.npy"),
+            allow_pickle=True,
         )
 
     def __len__(self):
@@ -165,7 +124,7 @@ class RecsysDatasetV12(Dataset):
         seq = seq.tolist()
         sliced_seq = seq[-self.max_len :]
         padding_length = self.max_len - len(sliced_seq)
-        padded_seq = [0] * padding_length + sliced_seq
+        padded_seq = sliced_seq + [0] * padding_length
         padded_seq = np.array(padded_seq)
         return padded_seq, padding_length
 
@@ -173,7 +132,7 @@ class RecsysDatasetV12(Dataset):
         seq = seq.tolist()
         sliced_seq = seq[-self.max_len :]
         padding_length = self.max_len - len(sliced_seq)
-        padded_seq = [[0] * 16] * padding_length + sliced_seq
+        padded_seq = sliced_seq + [[0] * 16] * padding_length
         padded_seq = np.array(padded_seq)
 
         return padded_seq, padding_length
@@ -210,27 +169,18 @@ class RecsysDatasetV12(Dataset):
         word_id = self.word_ids[idx]
         category_id = self.category_ids[idx]
         price_id = self.price_ids[idx]
+        timestamp = self.timestamps[idx]
 
         # statistical features
         statistical_features = self.statistical_features[idx]
 
         # labels
-        # buy_sku_label = self.buy_sku_labels[idx]
-        # buy_cat_label = self.buy_cat_labels[idx]
-        # buy_price_label = self.buy_price_labels[idx]
-        # add_sku_label = self.add_sku_labels[idx]
-        # add_cat_label = self.add_cat_labels[idx]
-        # add_price_label = self.add_price_labels[idx]
-        #
-        # is_contain_buy_sku = self.contain_buy_sku_labels[idx]
-        # is_contain_buy_cat = self.contain_buy_cat_labels[idx]
-        # is_contain_buy_price = self.contain_buy_price_labels[idx]
-        # is_contain_add_sku = self.contain_add_sku_labels[idx]
-        # is_contain_add_cat = self.contain_add_cat_labels[idx]
-        # is_contain_add_price = self.contain_add_price_labels[idx]
-        #
-        # is_churn = self.is_churn[idx]
-        # is_add = self.is_add[idx]
+        buy_sku_label = self.buy_sku_labels[idx]
+        buy_cat_label = self.buy_cat_labels[idx]
+
+        is_contain_buy_sku = self.contain_buy_sku_labels[idx]
+        is_contain_buy_cat = self.contain_buy_cat_labels[idx]
+        is_churn = self.is_churn[idx]
 
         # padding and masking sequence
         event_type, _ = self._pad_sequence(event_type)
@@ -239,135 +189,34 @@ class RecsysDatasetV12(Dataset):
         category_id, _ = self._pad_sequence(category_id)
         price_id, _ = self._pad_sequence(price_id)
         word_id, _ = self._pad_word_sequence(word_id)
+        timestamp, _ = self._pad_sequence(timestamp)
+        timestamp = torch.tensor(timestamp, dtype=torch.float)
 
         # statistical features
         statistical_features = torch.tensor(statistical_features, dtype=torch.float)
 
-        # buy_sku_label = torch.tensor(buy_sku_label, dtype=torch.long)
-        # buy_cat_label = torch.tensor(buy_cat_label, dtype=torch.long)
-        # buy_price_label = torch.tensor(buy_price_label, dtype=torch.long)
-        # add_sku_label = torch.tensor(add_sku_label, dtype=torch.long)
-        # add_cat_label = torch.tensor(add_cat_label, dtype=torch.long)
-        # add_price_label = torch.tensor(add_price_label, dtype=torch.long)
+        buy_sku_label = torch.tensor(buy_sku_label, dtype=torch.long)
+        buy_cat_label = torch.tensor(buy_cat_label, dtype=torch.long)
 
         return_dict = {
-            "client_id": client_id,
-            "original_seq": {
-                "event_type": event_type,
-                "sku": sku_id,
-                "url": url_id,
-                "category": category_id,
-                "price": price_id,
-                "word": word_id,
-            },
+            "client_id": torch.tensor(client_id),
+            "event_type": event_type,
+            "sku": sku_id,
+            "url": url_id,
+            "category": category_id,
+            "price": price_id,
+            "word": word_id,
+            "timestamp": timestamp,
             "statistical_feature": statistical_features,
-            # "labels": {
-            #     "is_churn": is_churn,
-            #     "is_add": is_add,
-            #     "buy_sku_label": buy_sku_label,
-            #     "buy_cat_label": buy_cat_label,
-            #     "buy_price_label": buy_price_label,
-            #     "add_sku_label": add_sku_label,
-            #     "add_cat_label": add_cat_label,
-            #     "add_price_label": add_price_label,
-            #     "is_contain_buy_sku": is_contain_buy_sku,
-            #     "is_contain_buy_cat": is_contain_buy_cat,
-            #     "is_contain_buy_price": is_contain_buy_price,
-            #     "is_contain_add_sku": is_contain_add_sku,
-            #     "is_contain_add_cat": is_contain_add_cat,
-            #     "is_contain_add_price": is_contain_add_price,
-            # },
+            "is_churn": is_churn,
+            "buy_sku_label": buy_sku_label,
+            "buy_cat_label": buy_cat_label,
+            "is_contain_buy_sku": is_contain_buy_sku,
+            "is_contain_buy_cat": is_contain_buy_cat,
         }
+
+
         return return_dict
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=50):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
-        self.register_buffer("pe", pe)
-
-    def forward(self, x):
-        """
-        Args:
-            x: Tensor, shape [batch_size, seq_len, embedding_dim]
-        """
-        x = x + self.pe[:, : x.size(1), :]
-        return self.dropout(x)
-
-
-class WordEmbedding(nn.Module):
-    def __init__(self, num_word, word_emb_dim, padding_idx=0):
-        super().__init__()
-
-        self.word_emb_layer = nn.Embedding(
-            num_embeddings=num_word,
-            embedding_dim=word_emb_dim,
-            padding_idx=padding_idx,
-        )
-
-    def forward(self, word_ids):
-        word_emb = self.word_emb_layer(word_ids)
-        avg_word_emb = torch.mean(word_emb, dim=-2)
-        return avg_word_emb
-
-
-class SkuEmbedding(nn.Module):
-    def __init__(
-        self,
-        num_sku,
-        sku_emb_dim,
-        num_cat,
-        cat_emb_dim,
-        num_price,
-        price_emb_dim,
-        word_emb_dim,
-        word_emb_layer,
-        item_emb_dim,
-        padding_idx=0,
-    ):
-        super().__init__()
-        self.sku_emb_layer = nn.Embedding(
-            num_embeddings=num_sku,
-            embedding_dim=sku_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.cat_emb_layer = nn.Embedding(
-            num_embeddings=num_cat,
-            embedding_dim=cat_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.price_emb_layer = nn.Embedding(
-            num_embeddings=num_price,
-            embedding_dim=price_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.word_emb_layer = word_emb_layer
-
-        self.fc1 = nn.Linear(
-            sku_emb_dim + cat_emb_dim + price_emb_dim + word_emb_dim,
-            item_emb_dim,
-        )
-        self.relu = nn.ReLU()
-
-    def forward(self, sku_id, cat_id, price_id, word_ids):
-        sku_emb = self.sku_emb_layer(sku_id)
-        cat_emb = self.cat_emb_layer(cat_id)
-        price_emb = self.price_emb_layer(price_id)
-        word_emb = self.word_emb_layer(word_ids)
-        concat_emb = torch.cat([sku_emb, cat_emb, price_emb, word_emb], dim=-1)
-        item_emb = self.fc1(concat_emb)
-        item_emb = self.relu(item_emb)
-        return item_emb
 
 
 class StaticFeatureMLP(nn.Module):
@@ -403,121 +252,44 @@ class FusionModule(nn.Module):
 
 
 class BehaviorSequenceTransformer(nn.Module):
-    def __init__(self, cfg=CFG, dtype=torch.float):
+    def __init__(self, config):
         super().__init__()
-        self.cfg = cfg
-        self.padding_idx = cfg.padding_idx
-        self.device = device
-        self.d_model = (
-            cfg.event_emb_dim + cfg.item_emb_dim
-        )
-        self.dtype = dtype
+        self.config = config
+        self.padding_idx = config.padding_idx
+        self.device = config.device
+        self.feature_encoder = EnhancedFeatureEncoder(config)
 
-        self.event_emb_layer = nn.Embedding(
-            num_embeddings=cfg.num_event,
-            embedding_dim=cfg.event_emb_dim,
-            padding_idx=self.padding_idx,
-        )
-
-        self.word_emb_layer = WordEmbedding(
-            num_word=cfg.num_word,
-            word_emb_dim=cfg.item_emb_dim,
-            padding_idx=self.padding_idx,
+        self.relative_attention_bias = RelativeBucketedTimeAndPositionBasedBias(
+            max_seq_len=config.max_seq_length,
+            num_buckets=config.time_buckets,
+            bucketization_fn=lambda x: (
+                    torch.log(torch.abs(x).clamp(min=1)) / 0.69314718056  # Using ln(2)
+            ).long(),
         )
 
-        self.sku_emb_layer = SkuEmbedding(
-            num_sku=cfg.num_sku,
-            sku_emb_dim=cfg.sku_emb_dim,
-            num_cat=cfg.num_cat,
-            cat_emb_dim=cfg.cat_emb_dim,
-            num_price=cfg.num_price,
-            price_emb_dim=cfg.price_emb_dim,
-            word_emb_dim=cfg.item_emb_dim,
-            word_emb_layer=self.word_emb_layer,
-            item_emb_dim=cfg.item_emb_dim,
-            padding_idx=self.padding_idx,
+        self.model = HSTUJagged(
+            modules=[
+                SequentialTransductionUnitJagged(
+                    embedding_dim=config.hidden_size,
+                    linear_hidden_dim=config.linear_dim,  # dv per head
+                    attention_dim=config.attention_dim,  # dqk per head
+                    num_heads=config.num_heads,
+                    relative_attention_bias_module=self.relative_attention_bias,  # Pass the shared module
+                    dropout_ratio=config.dropout,  # General dropout
+                    attn_dropout_ratio=config.attention_dropout,  # Specific attention dropout
+                    linear_activation=config.linear_activation,
+                    # normalization and linear_config are less critical now
+                )
+                for _ in range(config.num_layers)
+            ],
+            max_length=config.max_seq_length,
+            autocast_dtype=None,  # Consider config.mixed_precision_dtype if you add it
         )
 
-        self.url_emb_layer = nn.Embedding(
-            num_embeddings=cfg.num_url,
-            embedding_dim=cfg.item_emb_dim,
-            padding_idx=self.padding_idx,
-        )
-
-        self.day_emb_layer = nn.Embedding(
-            num_embeddings=cfg.num_day,
-            embedding_dim=cfg.day_emb_dim,
-            padding_idx=self.padding_idx,
-        )
-        self.week_emb_layer = nn.Embedding(
-            num_embeddings=cfg.num_week,
-            embedding_dim=cfg.week_emb_dim,
-            padding_idx=self.padding_idx,
-        )
-
-        self.pos_encoder = PositionalEncoding(
-            d_model=self.d_model,
-            dropout=cfg.dropout,
-            max_len=cfg.max_len,
-        )
-        self.trm_enc_layer = nn.TransformerEncoderLayer(
-            d_model=self.d_model,
-            nhead=cfg.num_heads,
-            dim_feedforward=cfg.item_emb_dim * 4,
-            dropout=cfg.dropout,
-            batch_first=True,
-        )
-        self.trm_enc = nn.TransformerEncoder(
-            self.trm_enc_layer, num_layers=cfg.num_layers
-        )
-
-        B = cfg.batch_size
-        S = cfg.max_len
-
-        self.template_agg_embeddings = torch.zeros(
-            (B, S, self.cfg.item_emb_dim), dtype=self.dtype, device=device
-        )
 
     def _generate_padding_mask(self, seq):
         mask = seq == self.padding_idx
         return mask  # (batch_size, seq_len)
-
-    def _aggregate_embeddings(
-        self,
-        event_type,
-        sku_id,
-        url_id,
-        cat_id,
-        price_id,
-        word_id,
-    ):
-
-        B, _ = event_type.shape
-        agg_embeddings = self.template_agg_embeddings.clone().detach()
-        agg_embeddings = agg_embeddings[:B, :, :]
-
-        sku_pos_idx = (
-            (event_type == EventType.ADD_TO_CART.value)
-            | (event_type == EventType.PRODUCT_BUY.value)
-            | (event_type == EventType.REMOVE_FROM_CART.value)
-        )
-        sku_id = sku_id[sku_pos_idx]
-        cat_id = cat_id[sku_pos_idx]
-        price_id = price_id[sku_pos_idx]
-        sku_word_id = word_id[sku_pos_idx]
-        x = self.sku_emb_layer(sku_id, cat_id, price_id, sku_word_id)
-
-        agg_embeddings[sku_pos_idx, :] = x
-
-        url_pos_idx = event_type == EventType.PAGE_VISIT.value
-        url_id = url_id[url_pos_idx]
-        agg_embeddings[url_pos_idx, :] = self.url_emb_layer(url_id)
-
-        query_pos_idx = event_type == EventType.SEARCH_QUERY.value
-        query_word_id = word_id[query_pos_idx]
-        agg_embeddings[query_pos_idx, :] = self.word_emb_layer(query_word_id)
-
-        return agg_embeddings
 
     def compute_user_embedding(
         self,
@@ -527,28 +299,26 @@ class BehaviorSequenceTransformer(nn.Module):
         cat_id,
         price_id,
         word_id,
+        timestamp,
     ):
-        src_padding_mask = self._generate_padding_mask(event_type)
-        event_type_seq_emb = self.event_emb_layer(event_type)
-        event_content_seq_emb = self._aggregate_embeddings(
-            event_type,
-            sku_id,
-            url_id,
-            cat_id,
-            price_id,
-            word_id,
+        mask = self._generate_padding_mask(event_type)
+        feature_embeddings = self.feature_encoder(
+            event_type, sku_id, url_id, cat_id, price_id, word_id
         )
 
+        if timestamp.dtype != torch.int64:
+            all_timestamps = (timestamp * 86400).to(torch.int64)
+        else:
+            all_timestamps = timestamp
 
-        seq_emb = torch.concat(
-            [event_type_seq_emb, event_content_seq_emb],
-            dim=-1,
+        seq_feat_emb, cache_states = self.model(
+            x=feature_embeddings,
+            all_timestamps=all_timestamps,
+            mask=mask,
+            device=self.device
         )
-        seq_emb = self.pos_encoder(seq_emb)
-        trm_enc_out = self.trm_enc(seq_emb, src_key_padding_mask=src_padding_mask)
 
-        user_emb = trm_enc_out[:, -1, :]
-        return user_emb
+        return seq_feat_emb
 
     def forward(
         self,
@@ -558,6 +328,7 @@ class BehaviorSequenceTransformer(nn.Module):
         cat_id,
         price_id,
         word_id,
+        timestamp,
     ):
         user_emb = self.compute_user_embedding(
             event_type,
@@ -566,6 +337,7 @@ class BehaviorSequenceTransformer(nn.Module):
             cat_id,
             price_id,
             word_id,
+            timestamp,
         )
 
         return user_emb
@@ -775,39 +547,24 @@ class PLE(nn.Module):
         ]
 
         churn_logits = self.churn_tower(tower_inputs[0])
-        add_logits = self.add_tower(tower_inputs[1])
-        buy_sku_logits = self.buy_sku_tower(tower_inputs[2])
-        buy_cat_logits = self.buy_cat_tower(tower_inputs[3])
-        buy_price_logits = self.buy_price_tower(tower_inputs[4])
-        add_sku_logits = self.add_sku_tower(tower_inputs[5])
-        add_cat_logits = self.add_cat_tower(tower_inputs[6])
-        add_price_logits = self.add_price_tower(tower_inputs[7])
+        buy_sku_logits = self.buy_sku_tower(tower_inputs[1])
+        buy_cat_logits = self.buy_cat_tower(tower_inputs[2])
 
         return (
             churn_logits,
-            add_logits,
             buy_sku_logits,
             buy_cat_logits,
-            buy_price_logits,
-            add_sku_logits,
-            add_cat_logits,
-            add_price_logits,
         )
 
 
 class LightningRecsysModel(L.LightningModule):
-    def __init__(self, cfg=CFG):
+    def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.d_model = (
-            cfg.event_emb_dim + cfg.item_emb_dim
-        )
 
-        self.user_emb_dim = cfg.fusion_mlp_output_dim
-        self.fusion_mlp_input_dim = self.d_model + cfg.static_features_dim
+        self.encoder = BehaviorSequenceTransformer(cfg)
 
-        self.encoder = BehaviorSequenceTransformer(cfg, self.dtype)
-
+        self.fusion_mlp_input_dim = cfg.hidden_size + cfg.static_features_dim
         self.fusion_mlp = FusionModule(
             input_dim=self.fusion_mlp_input_dim,
             hidden1_dim=cfg.fusion_mlp_hidden_dim,
@@ -816,7 +573,7 @@ class LightningRecsysModel(L.LightningModule):
         )
 
         self.ple = PLE(
-            user_emb_dim=self.user_emb_dim,
+            user_emb_dim=cfg.hidden_size,
             num_shared_experts=cfg.num_shared_experts,
             num_task_experts=cfg.num_task_experts,
             num_tasks=cfg.num_tasks,
@@ -830,24 +587,11 @@ class LightningRecsysModel(L.LightningModule):
         self.bce_loss = nn.BCEWithLogitsLoss()
 
         self.valid_auroc_churn = AUROC(task="binary")
-        self.valid_auroc_add = AUROC(task="binary")
         self.valid_auroc_buy_sku = AUROC(
             task="multilabel", num_labels=NUM_CANDIDATES_SKU
         )
         self.valid_auroc_buy_cat = AUROC(
             task="multilabel", num_labels=NUM_CANDIDATES_CAT
-        )
-        self.valid_auroc_buy_price = AUROC(
-            task="multilabel", num_labels=NUM_CANDIDATES_PRICE
-        )
-        self.valid_auroc_add_sku = AUROC(
-            task="multilabel", num_labels=NUM_CANDIDATES_SKU
-        )
-        self.valid_auroc_add_cat = AUROC(
-            task="multilabel", num_labels=NUM_CANDIDATES_CAT
-        )
-        self.valid_auroc_add_price = AUROC(
-            task="multilabel", num_labels=NUM_CANDIDATES_PRICE
         )
 
         self.save_hyperparameters()
@@ -860,10 +604,11 @@ class LightningRecsysModel(L.LightningModule):
         cat_id,
         price_id,
         word_id,
+        timestamp,
         statistical_features,
     ):
         seq_feat_emb = self.encoder(
-            event_type, sku_id, url_id, cat_id, price_id, word_id
+            event_type, sku_id, url_id, cat_id, price_id, word_id, timestamp
         )
 
         concat_feat = torch.concat(
@@ -885,8 +630,7 @@ class LightningRecsysModel(L.LightningModule):
         cat_id,
         price_id,
         word_id,
-        diff_days,
-        diff_weeks,
+        timestamp,
         statistical_features,
     ):
 
@@ -897,19 +641,13 @@ class LightningRecsysModel(L.LightningModule):
             cat_id,
             price_id,
             word_id,
-            diff_days,
-            diff_weeks,
+            timestamp,
             statistical_features,
         )
         (
             logits_churn,
-            logits_add,
             logits_buy_sku,
             logits_buy_cat,
-            logits_buy_price,
-            logits_add_sku,
-            logits_add_cat,
-            logits_add_price,
         ) = self.calc_logits(user_emb)
 
         return (
@@ -924,39 +662,23 @@ class LightningRecsysModel(L.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
-        original_seq = batch["original_seq"]
-        # labels = batch["labels"]
         # statistical feat
         statistical_feature = batch["statistical_feature"]
 
         # sequence feat
-        event_type = original_seq["event_type"]
-        sku = original_seq["sku"]
-        url = original_seq["url"]
-        category = original_seq["category"]
-        price = original_seq["price"]
-        word = original_seq["word"]
-        # diff_days = original_seq["diff_days"]
-        # diff_weeks = original_seq["diff_weeks"]
-
+        event_type = batch["event_type"]
+        sku = batch["sku"]
+        url = batch["url"]
+        category = batch["category"]
+        price = batch["price"]
+        word = batch["word"]
+        timestamp = batch["timestamp"]
         # label
-        # label_churn = labels["is_churn"]
-        # label_add = labels["is_add"]
-        # label_buy_sku = labels["buy_sku_label"]
-        # label_buy_cat = labels["buy_cat_label"]
-        # label_buy_price = labels["buy_price_label"]
-        #
-        # label_add_sku = labels["add_sku_label"]
-        # label_add_cat = labels["add_cat_label"]
-        # label_add_price = labels["add_price_label"]
-        #
-        # is_contain_buy_sku = labels["is_contain_buy_sku"]
-        # is_contain_buy_cat = labels["is_contain_buy_cat"]
-        # is_contain_buy_price = labels["is_contain_buy_price"]
-        #
-        # is_contain_add_sku = labels["is_contain_add_sku"]
-        # is_contain_add_cat = labels["is_contain_add_cat"]
-        # is_contain_add_price = labels["is_contain_add_price"]
+        label_churn = batch["is_churn"]
+        label_buy_sku = batch["buy_sku_label"]
+        label_buy_cat = batch["buy_cat_label"]
+        is_contain_buy_sku = batch["is_contain_buy_sku"]
+        is_contain_buy_cat = batch["is_contain_buy_cat"]
 
         user_emb = self.compute_user_embedding(
             event_type,
@@ -965,18 +687,14 @@ class LightningRecsysModel(L.LightningModule):
             category,
             price,
             word,
+            timestamp,
             statistical_feature,
         )
 
         (
             logits_churn,
-            logits_add,
             logits_buy_sku,
             logits_buy_cat,
-            logits_buy_price,
-            logits_add_sku,
-            logits_add_cat,
-            logits_add_price,
         ) = self.calc_logits(user_emb)
 
         # Logging user embedding statistics
@@ -989,10 +707,6 @@ class LightningRecsysModel(L.LightningModule):
         logits_churn = logits_churn.squeeze(-1)
         loss_churn = self.bce_loss(logits_churn, label_churn.float())
         loss_churn = loss_churn * self.cfg.churn_loss_weight
-
-        logits_add = logits_add.squeeze(-1)
-        loss_add = self.bce_loss(logits_add, label_add.float())
-        loss_add = loss_add * self.cfg.add_loss_weight
 
         # Auxiliary Task
         # calculate loss for 100 types of sku/cat/price for buy
@@ -1010,91 +724,37 @@ class LightningRecsysModel(L.LightningModule):
                 logits_buy_cat[mask], label_buy_cat[mask].float()
             )
 
-        loss_buy_price = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_buy_price) > 0:
-            mask = is_contain_buy_price == 1
-            loss_buy_price = self.bce_loss(
-                logits_buy_price[mask], label_buy_price[mask].float()
-            )
-        # calculate loss for 100 types of sku/cat/price for add
-        loss_add_sku = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_add_sku) > 0:
-            mask = is_contain_add_sku == 1
-            loss_add_sku = self.bce_loss(
-                logits_add_sku[mask], label_add_sku[mask].float()
-            )
-
-        loss_add_cat = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_add_cat) > 0:
-            mask = is_contain_add_cat == 1
-            loss_add_cat = self.bce_loss(
-                logits_add_cat[mask], label_add_cat[mask].float()
-            )
-
-        loss_add_price = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_add_price) > 0:
-            mask = is_contain_add_price == 1
-            loss_add_price = self.bce_loss(
-                logits_add_price[mask], label_add_price[mask].float()
-            )
-
         self.log("train/loss_churn", loss_churn)
-        self.log("train/loss_add", loss_add)
         self.log("train/loss_buy_sku", loss_buy_sku)
         self.log("train/loss_buy_cat", loss_buy_cat)
-        self.log("train/loss_buy_price", loss_buy_price)
-        self.log("train/loss_add_sku", loss_add_sku)
-        self.log("train/loss_add_cat", loss_add_cat)
-        self.log("train/loss_add_price", loss_add_price)
 
         sum_loss = (
             loss_churn
-            + loss_add
             + loss_buy_sku
             + loss_buy_cat
-            + loss_buy_price
-            + loss_add_sku
-            + loss_add_cat
-            + loss_add_price
         )
 
         self.log("train/sum_loss", sum_loss)
         return sum_loss
 
     def validation_step(self, batch, batch_idx):
-        original_seq = batch["original_seq"]
-        labels = batch["labels"]
-        # statistical feat
         statistical_feature = batch["statistical_feature"]
 
         # sequence feat
-        event_type = original_seq["event_type"]
-        sku = original_seq["sku"]
-        url = original_seq["url"]
-        category = original_seq["category"]
-        price = original_seq["price"]
-        word = original_seq["word"]
-        diff_days = original_seq["diff_days"]
-        diff_weeks = original_seq["diff_weeks"]
-
+        event_type = batch["event_type"]
+        sku = batch["sku"]
+        url = batch["url"]
+        category = batch["category"]
+        price = batch["price"]
+        word = batch["word"]
+        timestamp = batch["timestamp"]
         # label
-        label_churn = labels["is_churn"]
-        label_add = labels["is_add"]
-        label_buy_sku = labels["buy_sku_label"]
-        label_buy_cat = labels["buy_cat_label"]
-        label_buy_price = labels["buy_price_label"]
+        label_churn = batch["is_churn"]
+        label_buy_sku = batch["buy_sku_label"]
+        label_buy_cat = batch["buy_cat_label"]
+        is_contain_buy_sku = batch["is_contain_buy_sku"]
+        is_contain_buy_cat = batch["is_contain_buy_cat"]
 
-        label_add_sku = labels["add_sku_label"]
-        label_add_cat = labels["add_cat_label"]
-        label_add_price = labels["add_price_label"]
-
-        is_contain_buy_sku = labels["is_contain_buy_sku"]
-        is_contain_buy_cat = labels["is_contain_buy_cat"]
-        is_contain_buy_price = labels["is_contain_buy_price"]
-
-        is_contain_add_sku = labels["is_contain_add_sku"]
-        is_contain_add_cat = labels["is_contain_add_cat"]
-        is_contain_add_price = labels["is_contain_add_price"]
         user_emb = self.compute_user_embedding(
             event_type,
             sku,
@@ -1102,20 +762,14 @@ class LightningRecsysModel(L.LightningModule):
             category,
             price,
             word,
-            diff_days,
-            diff_weeks,
+            timestamp,
             statistical_feature,
         )
 
         (
             logits_churn,
-            logits_add,
             logits_buy_sku,
             logits_buy_cat,
-            logits_buy_price,
-            logits_add_sku,
-            logits_add_cat,
-            logits_add_price,
         ) = self.calc_logits(user_emb)
 
         zero_ratio = (user_emb == 0).float().mean()
@@ -1127,10 +781,6 @@ class LightningRecsysModel(L.LightningModule):
         logits_churn = logits_churn.squeeze(-1)
         loss_churn = self.bce_loss(logits_churn, label_churn.float())
         loss_churn = loss_churn * self.cfg.churn_loss_weight
-
-        logits_add = logits_add.squeeze(-1)
-        loss_add = self.bce_loss(logits_add, label_add.float())
-        loss_add = loss_add * self.cfg.add_loss_weight
 
         # Auxiliary Task
         loss_buy_sku = torch.tensor(0.0, device=self.device)
@@ -1147,59 +797,21 @@ class LightningRecsysModel(L.LightningModule):
                 logits_buy_cat[mask], label_buy_cat[mask].float()
             )
 
-        loss_buy_price = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_buy_price) > 0:
-            mask = is_contain_buy_price == 1
-            loss_buy_price = self.bce_loss(
-                logits_buy_price[mask], label_buy_price[mask].float()
-            )
-        # add
-        loss_add_sku = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_add_sku) > 0:
-            mask = is_contain_add_sku == 1
-            loss_add_sku = self.bce_loss(
-                logits_add_sku[mask], label_add_sku[mask].float()
-            )
-
-        loss_add_cat = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_add_cat) > 0:
-            mask = is_contain_add_cat == 1
-            loss_add_cat = self.bce_loss(
-                logits_add_cat[mask], label_add_cat[mask].float()
-            )
-
-        loss_add_price = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_add_price) > 0:
-            mask = is_contain_add_price == 1
-            loss_add_price = self.bce_loss(
-                logits_add_price[mask], label_add_price[mask].float()
-            )
 
         self.log("valid/loss_churn", loss_churn)
-        self.log("valid/loss_add", loss_add)
         self.log("valid/loss_buy_sku", loss_buy_sku)
         self.log("valid/loss_buy_cat", loss_buy_cat)
-        self.log("valid/loss_buy_price", loss_buy_price)
-        self.log("valid/loss_add_sku", loss_add_sku)
-        self.log("valid/loss_add_cat", loss_add_cat)
-        self.log("valid/loss_add_price", loss_add_price)
 
         sum_loss = (
             loss_churn
-            + loss_add
             + loss_buy_sku
             + loss_buy_cat
-            + loss_buy_price
-            + loss_add_sku
-            + loss_add_cat
-            + loss_add_price
         )
 
         self.log("valid/sum_loss", sum_loss)
 
         # Update AUROC metrics
         self.valid_auroc_churn.update(logits_churn, label_churn)
-        self.valid_auroc_add.update(logits_add, label_add)
 
         if torch.sum(is_contain_buy_sku) > 0:
             mask = is_contain_buy_sku == 1
@@ -1213,52 +825,21 @@ class LightningRecsysModel(L.LightningModule):
                 logits_buy_cat[mask], label_buy_cat[mask].int()
             )
 
-        if torch.sum(is_contain_buy_price) > 0:
-            mask = is_contain_buy_price == 1
-            self.valid_auroc_buy_price.update(
-                logits_buy_price[mask], label_buy_price[mask].int()
-            )
-        if torch.sum(is_contain_add_sku) > 0:
-            mask = is_contain_add_sku == 1
-            self.valid_auroc_add_sku.update(
-                logits_add_sku[mask], label_add_sku[mask].int()
-            )
-
-        if torch.sum(is_contain_add_cat) > 0:
-            mask = is_contain_add_cat == 1
-            self.valid_auroc_add_cat.update(
-                logits_add_cat[mask], label_add_cat[mask].int()
-            )
-
-        if torch.sum(is_contain_add_price) > 0:
-            mask = is_contain_add_price == 1
-            self.valid_auroc_add_price.update(
-                logits_add_price[mask], label_add_price[mask].int()
-            )
 
     def on_validation_epoch_end(self):
         self.log("valid/AUROC_churn", self.valid_auroc_churn.compute())
-        self.log("valid/AUROC_add", self.valid_auroc_add.compute())
-        # self.log("valid/AUROC_buy_sku", self.valid_auroc_buy_sku.compute())
+        self.log("valid/AUROC_buy_sku", self.valid_auroc_buy_sku.compute())
         self.log("valid/AUROC_buy_cat", self.valid_auroc_buy_cat.compute())
-        self.log("valid/AUROC_buy_price", self.valid_auroc_buy_price.compute())
-        self.log("valid/AUROC_add_sku", self.valid_auroc_add_sku.compute())
-        self.log("valid/AUROC_add_cat", self.valid_auroc_add_cat.compute())
-        self.log("valid/AUROC_add_price", self.valid_auroc_add_price.compute())
         self.log(
             "valid/sum_score",
             self.valid_auroc_churn.compute()
-            # + self.valid_auroc_buy_sku.compute()
+            + self.valid_auroc_buy_sku.compute()
             + self.valid_auroc_buy_cat.compute(),
         )
+
         self.valid_auroc_churn.reset()
-        self.valid_auroc_add.reset()
-        # self.valid_auroc_buy_sku.reset()
+        self.valid_auroc_buy_sku.reset()
         self.valid_auroc_buy_cat.reset()
-        self.valid_auroc_buy_price.reset()
-        self.valid_auroc_add_sku.reset()
-        self.valid_auroc_add_cat.reset()
-        self.valid_auroc_add_price.reset()
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
@@ -1266,44 +847,94 @@ class LightningRecsysModel(L.LightningModule):
 
 
 def main():
-    # login_wandb()
-
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--dataset_type",
+        "--data-dir",
         type=str,
-        default="train",
-        choices=["train", "valid"],
+        default='../dataset/mtl',
+        help="Directory where target and input data are stored",
     )
-    # args = parser.parse_args()
-    # dataset_type = args.dataset_type
-    # dataset_dir = os.path.join(BASE_PATH, dataset_type)
+    parser.add_argument(
+        "--accelerator",
+        type=str,
+        default="cpu",
+        help="Accelerator type (cuda or cpu)",
+    )
+    parser.add_argument(
+        "--devices",
+        type=str,
+        default="0",
+        help="Device ID",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Number of workers for data loading",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=128,
+        help="Batch size for training",
+    )
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=3,
+        help="Number of training epochs",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=1e-4,
+        help="Learning rate",
+    )
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        default='./save/train_features_epoch3_category/',
+        help="Directory where to store generated embeddings",
+    )
+    args = parser.parse_args()
+    device = f"cuda:{args.devices}" if args.accelerator == "cuda" else "cpu"
+    config = Config(
+        batch_size=args.batch_size,
+        num_epochs=args.num_epochs,
+        learning_rate=args.learning_rate,
+        accelerator=args.accelerator,
+        device=device,
+        num_workers=args.num_workers,
+        # output_dir=str(embeddings_dir),
+        devices=[int(args.devices)] if args.accelerator == "cuda" else [],
+        # save_dir=args.save_dir,
+    )
 
-    train_dataset_dir = os.path.join(BASE_PATH, "train")
-    valid_dataset_dir = os.path.join(BASE_PATH, "valid")
+    train_dataset_dir = os.path.join(args.data_dir, "train")
+    valid_dataset_dir = os.path.join(args.data_dir, "valid")
 
-    train_dataset = RecsysDatasetV12(dataset_dir=train_dataset_dir, max_len=CFG.max_len)
-    valid_dataset = RecsysDatasetV12(dataset_dir=valid_dataset_dir, max_len=CFG.max_len)
+    train_dataset = RecsysDatasetV12(dataset_dir=train_dataset_dir, max_len=config.max_seq_length)
+    valid_dataset = RecsysDatasetV12(dataset_dir=valid_dataset_dir, max_len=config.max_seq_length)
 
     print(f"train_size : {len(train_dataset)}")
     print(f"valid_size : {len(valid_dataset)}")
 
     train_dataloader = DataLoader(
         train_dataset,
-        batch_size=CFG.batch_size,
-        num_workers=CFG.num_workers,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
         pin_memory=True,
         shuffle=True,
     )
     valid_dataloader = DataLoader(
         valid_dataset,
-        batch_size=CFG.batch_size,
-        num_workers=CFG.num_workers,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
         pin_memory=True,
         shuffle=True,
     )
 
-    model = LightningRecsysModel(CFG)
+    model = LightningRecsysModel(config)
 
     save_path = "./results/weights/"
     os.makedirs(save_path, exist_ok=True)
@@ -1321,8 +952,8 @@ def main():
     trainer = L.Trainer(
         callbacks=[checkpoint_callback, model_summary],
         # logger=wandb_logger,
-        accelerator="cpu",
-        max_epochs=CFG.n_epochs,
+        accelerator=args.accelerator,
+        max_epochs=config.num_epochs,
         num_sanity_val_steps=0,
     )
     trainer.fit(

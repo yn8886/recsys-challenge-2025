@@ -305,11 +305,21 @@ def create_positive_samples(
     SKU_CATID_MAPPING_PATH = os.path.join(MAPPING_DIR, "sku2catid_mapping.json")
     buy_map = {row["client_id"]: row["buy_sku"] for row in agg_product_buy_df.iter_rows(named=True)}
 
+
     if dataset_type == 'train':
         print("Generatng SKU Mapping (Train Mode)...")
-        sku_to_cat_map = \
-            product_prop_df.select(['sku', pl.col("category_id")]).unique().to_pandas().set_index(
-                'sku')['category_id'].to_dict()
+        # sku_to_cat_map = \
+        #     product_prop_df.select(['sku', pl.col("category_id")]).unique().to_pandas().set_index(
+        #         'sku')['category_id'].to_dict()
+
+        sku_to_cat_map = dict(
+            product_prop_df
+            .select([
+                pl.col('sku').cast(pl.Int64),
+                pl.col('category_id')
+            ])
+            .unique()
+            .iter_rows())
 
         with open(SKU_CATID_MAPPING_PATH, 'w') as f:
             json.dump(sku_to_cat_map, f)
@@ -321,7 +331,7 @@ def create_positive_samples(
 
         with open(SKU_CATID_MAPPING_PATH, 'r') as f:
             sku_to_cat_map = json.load(f)
-
+            sku_to_cat_map = {int(k): v for k, v in sku_to_cat_map.items()}
 
     client_ids = []
     pos_sku_ids_list = []
@@ -361,7 +371,7 @@ def main():
     parser.add_argument(
         "--dataset_type",
         type=str,
-        default="train",
+        default="valid",
         choices=["train", "valid"],
     )
 

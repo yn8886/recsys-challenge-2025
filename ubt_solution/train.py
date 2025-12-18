@@ -2,26 +2,15 @@ import argparse
 import math
 import os
 import json
-from datetime import datetime
 import logging
 from pathlib import Path
 from enum import Enum
 import random
 import numpy as np
-import polars as pl
 import torch
-import torch.nn as nn
-from aiohttp.log import client_logger
-from tensorflow import timestamp
 from torch.utils.data._utils.collate import default_collate
 from config import Config
-# import wandb
-from dotenv import load_dotenv
-from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
-# from lightning.pytorch.loggers import WandbLogger
-from torch import Tensor, optim
 from torch.utils.data import DataLoader, Dataset
-from torchmetrics.classification import AUROC, MultilabelAccuracy
 from trainer import UBTTrainer
 from model import UniversalBehavioralTransformer
 
@@ -426,8 +415,6 @@ def main():
     )
 
     model = UniversalBehavioralTransformer(config)
-
-    # wandb_logger = WandbLogger(project="Recsys", name=exp_name, log_model=True)
 
     trainer = UBTTrainer(
         model=model,
