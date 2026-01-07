@@ -1,31 +1,37 @@
 import argparse
+import math
 import os
+from datetime import datetime
 from enum import Enum
 import logging
 import lightning as L
 import numpy as np
+import polars as pl
 import torch
 import torch.nn as nn
+from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
+from sympy.utilities.timeutils import timethis
 from torch import Tensor, optim
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics.classification import AUROC
 from config import Config
-from model import EnhancedFeatureEncoder
-from models.hstu_modules import (
-    RelativeBucketedTimeAndPositionBasedBias,
-    SequentialTransductionUnitJagged,
-    HSTUJagged,
-)
-from tqdm import tqdm
+from model import WordEmbedding, PositionalEncoding
+# from models.hstu_modules import (
+#     RelativeBucketedTimeAndPositionBasedBias,
+#     SequentialTransductionUnitJagged,
+#     HSTUJagged,
+# )
+
+NUM_CANDIDATES_SKU = 100
+NUM_CANDIDATES_CAT = 100
+NUM_CANDIDATES_PRICE = 100
 
 exp_name = os.path.splitext(os.path.basename(__file__))[0]
 torch.backends.cudnn.benchmark = True
 
 np.random.seed(42)
-
-NUM_CANDIDATES_SKU = 100
-NUM_CANDIDATES_CAT = 100
-NUM_CANDIDATES_PRICE = 100
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class EventType(Enum):
     # 0はpad_idx、1はmask
@@ -81,7 +87,7 @@ class RecsysDatasetV12(Dataset):
         )
 
         self.timestamps = np.load(
-            os.path.join(self.dataset_dir, "norm_timestamp.npy"), allow_pickle=True
+            os.path.join(self.dataset_dir, "timestamp.npy"), allow_pickle=True
         )
 
         print("Loading static_features.npy")
@@ -119,7 +125,7 @@ class RecsysDatasetV12(Dataset):
         seq = seq.tolist()
         sliced_seq = seq[-self.max_len :]
         padding_length = self.max_len - len(sliced_seq)
-        padded_seq = sliced_seq + [0] * padding_length
+        padded_seq = [0] * padding_length + sliced_seq
         padded_seq = np.array(padded_seq)
         return padded_seq, padding_length
 
@@ -127,7 +133,7 @@ class RecsysDatasetV12(Dataset):
         seq = seq.tolist()
         sliced_seq = seq[-self.max_len :]
         padding_length = self.max_len - len(sliced_seq)
-        padded_seq = sliced_seq + [[0] * 16] * padding_length
+        padded_seq = [[0] * 16] * padding_length + sliced_seq
         padded_seq = np.array(padded_seq)
 
         return padded_seq, padding_length
@@ -210,7 +216,6 @@ class RecsysDatasetV12(Dataset):
             "is_contain_buy_cat": is_contain_buy_cat,
         }
 
-
         return return_dict
 
 
@@ -252,88 +257,75 @@ class BehaviorSequenceTransformer(nn.Module):
         self.config = config
         self.padding_idx = config.padding_idx
         self.device = config.device
-        self.feature_encoder = EnhancedFeatureEncoder(config)
+        self.d_model = config.item_emb_dim + config.event_emb_dim + config.sku_emb_dim + config.url_emb_dim + config.cat_emb_dim + config.price_emb_dim
 
-        self.relative_attention_bias = RelativeBucketedTimeAndPositionBasedBias(
-            max_seq_len=config.max_seq_length,
-            num_buckets=config.time_buckets,
-            bucketization_fn=lambda x: (
-                    torch.log(torch.abs(x).clamp(min=1)) / 0.69314718056  # Using ln(2)
-            ).long(),
+        self.event_embedding = nn.Embedding(config.num_event, config.event_emb_dim, padding_idx=0)
+        self.sku_embedding = nn.Embedding(config.num_sku, config.sku_emb_dim, padding_idx=0)
+        self.category_embedding = nn.Embedding(config.num_cat, config.cat_emb_dim, padding_idx=0)
+        self.price_embedding = nn.Embedding(config.num_price, config.price_emb_dim, padding_idx=0)
+        self.url_embedding = nn.Embedding(config.num_url, config.url_emb_dim, padding_idx=0)
+
+        self.word_embedding = WordEmbedding(
+            num_word=config.num_word,
+            word_emb_dim=config.item_emb_dim,
+            dropout=config.dropout,
         )
 
-        self.model = HSTUJagged(
-            modules=[
-                SequentialTransductionUnitJagged(
-                    embedding_dim=config.hidden_size,
-                    linear_hidden_dim=config.linear_dim,  # dv per head
-                    attention_dim=config.attention_dim,  # dqk per head
-                    num_heads=config.num_heads,
-                    relative_attention_bias_module=self.relative_attention_bias,  # Pass the shared module
-                    dropout_ratio=config.dropout,  # General dropout
-                    attn_dropout_ratio=config.attention_dropout,  # Specific attention dropout
-                    linear_activation=config.linear_activation,
-                    # normalization and linear_config are less critical now
-                )
-                for _ in range(config.num_layers)
-            ],
-            max_length=config.max_seq_length,
-            autocast_dtype=None,  # Consider config.mixed_precision_dtype if you add it
-        )
+        self.feature_encoder = nn.Linear(self.d_model, config.hidden_size)
 
+        # self.relative_attention_bias = RelativeBucketedTimeAndPositionBasedBias(
+        #     max_seq_len=config.max_seq_length,
+        #     num_buckets=config.time_buckets,
+        #     bucketization_fn=lambda x: (
+        #             torch.log(torch.abs(x).clamp(min=1)) / 0.69314718056  # Using ln(2)
+        #     ).long(),
+        # )
 
-    def _generate_padding_mask(self, seq):
-        mask = seq == self.padding_idx
-        return mask  # (batch_size, seq_len)
-
-    def compute_user_embedding(
-        self,
-        event_type,
-        sku_id,
-        url_id,
-        cat_id,
-        price_id,
-        word_id,
-        timestamp,
-    ):
-        mask = self._generate_padding_mask(event_type)
-        feature_embeddings = self.feature_encoder(
-            event_type, sku_id, url_id, cat_id, price_id, word_id
-        )
-
-        if timestamp.dtype != torch.int64:
-            all_timestamps = (timestamp * 86400).to(torch.int64)
-        else:
-            all_timestamps = timestamp
-
-        seq_feat_emb, cache_states = self.model(
-            x=feature_embeddings,
-            all_timestamps=all_timestamps,
-            mask=mask,
-            device=self.device
-        )
-
-        return seq_feat_emb
+        if not config.use_hstu:
+            self.pos_encoder = PositionalEncoding(
+                d_model=config.hidden_size,
+                dropout=config.dropout,
+                max_len=config.max_seq_length,
+            )
+            self.trm_enc_layer = nn.TransformerEncoderLayer(
+                d_model=config.hidden_size,
+                nhead=config.num_heads,
+                dim_feedforward=config.hidden_size * 4,
+                dropout=config.dropout,
+                batch_first=True,
+            )
+            self.model = nn.TransformerEncoder(
+                self.trm_enc_layer, num_layers=config.num_layers
+            )
 
     def forward(
         self,
-        event_type,
-        sku_id,
-        url_id,
-        cat_id,
-        price_id,
-        word_id,
+        event_types,
+        sku_ids,
+        url_ids,
+        cat_ids,
+        price_ids,
+        word_ids,
         timestamp,
     ):
-        user_emb = self.compute_user_embedding(
-            event_type,
-            sku_id,
-            url_id,
-            cat_id,
-            price_id,
-            word_id,
-            timestamp,
-        )
+        mask = event_types == self.padding_idx
+
+        event_emb = self.event_embedding(event_types)
+        cat_emb = self.category_embedding(cat_ids)
+        price_emb = self.price_embedding(price_ids)
+        word_emb = self.word_embedding(word_ids)
+        sku_emb = self.sku_embedding(sku_ids)
+        url_emb = self.url_embedding(url_ids)
+
+        # 计算特征重要性 - 添加数值稳定性 - 现在包含Item ID和URL特征
+        features = [event_emb, cat_emb, price_emb, word_emb, sku_emb, url_emb]
+        features = torch.cat(features, dim=2)
+        feature_embeddings = self.feature_encoder(features)
+
+        if not self.config.use_hstu:
+            feature_embeddings = self.pos_encoder(feature_embeddings)
+            trm_enc_out = self.model(feature_embeddings, src_key_padding_mask=mask)
+            user_emb = trm_enc_out[:, -1, :]
 
         return user_emb
 
@@ -829,7 +821,7 @@ class LightningRecsysModel(L.LightningModule):
         valid_auroc_churn_score = self.valid_auroc_churn.compute().item()
         valid_auroc_sku_score = self.valid_auroc_buy_sku.compute().item()
         valid_auroc_cat_score = self.valid_auroc_buy_cat.compute().item()
-        sum_aucroc_score = (valid_auroc_churn_score + valid_auroc_sku_score + valid_auroc_cat_score).item(),
+        sum_aucroc_score = valid_auroc_churn_score + valid_auroc_sku_score + valid_auroc_cat_score
 
         self.log("valid/AUROC_churn", valid_auroc_churn_score)
         self.log("valid/AUROC_buy_sku", valid_auroc_sku_score)
@@ -843,7 +835,7 @@ class LightningRecsysModel(L.LightningModule):
 
         val_metrics = {}
         val_metrics['churn_auc'] = valid_auroc_churn_score
-        val_metrics['cat_loss'] = valid_auroc_cat_score
+        val_metrics['cat_lo'] = valid_auroc_cat_score
         val_metrics['sku_auc'] = valid_auroc_sku_score
         val_metrics['sum_auc'] = sum_aucroc_score
         logger.info(f"Validation metrics: {val_metrics}")
@@ -859,15 +851,6 @@ class LightningRecsysModel(L.LightningModule):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--dataset_type",
-        type=str,
-        default="train",
-        choices=["train", "valid",],
-    )
-    parser.add_argument(
-        "--model_path", type=str, default="./results/weights/epoch=1-step=8.ckpt"
-    )
     parser.add_argument(
         "--data-dir",
         type=str,
@@ -889,7 +872,7 @@ def main():
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=0,
+        default=1,
         help="Number of workers for data loading",
     )
     parser.add_argument(
@@ -922,58 +905,57 @@ def main():
         devices=[int(args.devices)] if args.accelerator == "cuda" else [],
     )
 
-    model = LightningRecsysModel.load_from_checkpoint(args.model_path)
-    model.eval()
+    train_dataset_dir = os.path.join(args.data_dir, "train")
+    valid_dataset_dir = os.path.join(args.data_dir, "valid")
 
-    dataset_dir = os.path.join(args.data_dir, args.dataset_type)
-    dataset = RecsysDatasetV12(dataset_dir=dataset_dir, max_len=config.max_seq_length)
-    dataloader = DataLoader(
-        dataset,
+    train_dataset = RecsysDatasetV12(dataset_dir=train_dataset_dir, max_len=config.max_seq_length)
+    valid_dataset = RecsysDatasetV12(dataset_dir=valid_dataset_dir, max_len=config.max_seq_length)
+
+    print(f"train_size : {len(train_dataset)}")
+    print(f"valid_size : {len(valid_dataset)}")
+
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=config.batch_size,
-        pin_memory=True,
         num_workers=config.num_workers,
-        shuffle=False,
+        pin_memory=True,
+        shuffle=True,
+    )
+    valid_dataloader = DataLoader(
+        valid_dataset,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        pin_memory=True,
+        shuffle=True,
     )
 
-    client_ids = []
-    embeddings = []
-    with torch.no_grad():
-        for batch in tqdm(dataloader):
-            client_id = batch["client_id"]
-            statistical_feature = batch["statistical_feature"].to(device)
+    model = LightningRecsysModel(config)
 
-            # sequence features
-            event_type = batch["event_type"].to(device)
-            sku = batch["sku"].to(device)
-            url = batch["url"].to(device)
-            category = batch["category"].to(device)
-            price = batch["price"].to(device)
-            word = batch["word"].to(device)
-            timestamp = batch["timestamp"].to(device)
-
-            user_emb = model.compute_user_embedding(
-                event_type,
-                sku,
-                url,
-                category,
-                price,
-                word,
-                timestamp,
-                statistical_feature,
-            )
-
-            client_ids.append(client_id)
-            embeddings.append(user_emb.squeeze(1).cpu())
-
-    client_ids = torch.concat(client_ids)
-    embeddings = torch.concat(embeddings)
-    client_ids_npy = np.array(client_ids)
-    embeddings_npy = embeddings.detach().numpy().astype(np.float16)
-
-    save_path = os.path.join(config.output_dir, f'mtl/{args.dataset_type}')
+    save_path = "./results/weights/"
     os.makedirs(save_path, exist_ok=True)
-    np.save(os.path.join(save_path, "client_ids.npy"), client_ids_npy)
-    np.save(os.path.join(save_path, "embeddings.npy"), embeddings_npy)
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=save_path,
+        monitor="valid/sum_score",
+        save_top_k=3,
+        mode="max",
+        save_weights_only=True,
+    )
+    model_summary = ModelSummary(max_depth=3)
+
+    # wandb_logger = WandbLogger(project="Recsys", name=exp_name, log_model=True)
+
+    trainer = L.Trainer(
+        callbacks=[checkpoint_callback, model_summary],
+        # logger=wandb_logger,
+        accelerator=args.accelerator,
+        max_epochs=config.num_epochs,
+        num_sanity_val_steps=0,
+    )
+    trainer.fit(
+        model,
+        train_dataloader,
+        valid_dataloader,
+    )
 
 
 if __name__ == "__main__":

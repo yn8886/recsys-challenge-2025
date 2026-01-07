@@ -802,7 +802,7 @@ class LightningRecsysModel(L.LightningModule):
                 logits_buy_cat[mask], label_buy_cat[mask].float()
             )
 
-        logger.info('valid/loss_churn', loss_churn)
+        self.log('valid/loss_churn', loss_churn)
 
         sum_loss = (
             loss_churn
@@ -839,7 +839,7 @@ class LightningRecsysModel(L.LightningModule):
         valid_auroc_churn_score = self.valid_auroc_churn.compute().item()
         valid_auroc_sku_score = self.valid_auroc_buy_sku.compute().item()
         valid_auroc_cat_score = self.valid_auroc_buy_cat.compute().item()
-        sum_aucroc_score = (valid_auroc_churn_score + valid_auroc_sku_score + valid_auroc_cat_score).item(),
+        sum_aucroc_score = valid_auroc_churn_score + valid_auroc_sku_score + valid_auroc_cat_score
 
         self.log("valid/AUROC_churn", valid_auroc_churn_score)
         self.log("valid/AUROC_buy_sku", valid_auroc_sku_score)
@@ -853,7 +853,7 @@ class LightningRecsysModel(L.LightningModule):
 
         val_metrics = {}
         val_metrics['churn_auc'] = valid_auroc_churn_score
-        val_metrics['cat_loss'] = valid_auroc_cat_score
+        val_metrics['cat_lo'] = valid_auroc_cat_score
         val_metrics['sku_auc'] = valid_auroc_sku_score
         val_metrics['sum_auc'] = sum_aucroc_score
         logger.info(f"Validation metrics: {val_metrics}")
