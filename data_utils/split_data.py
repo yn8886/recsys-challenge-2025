@@ -175,7 +175,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--challenge-data-dir",
         type=str,
-        default='../dataset/ubc_data/',
+        default='../dataset/ubc_data_tiny/',
         help="Competition data directory which should consists of event files, product properties and two subdirectories — input and target",
     )
     return parser

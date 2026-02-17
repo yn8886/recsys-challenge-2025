@@ -30,22 +30,17 @@ class Config:
     cat_emb_dim = 96
     price_emb_dim = 16
     word_emb_dim = 384
-
-    use_time = True
-    timestamp_dim = 256
-    num_timestamp_bins = 256
-
+    
     # 行为类型配置
     dropout= 0.2
     num_heads = 8
     churn_loss_weight = 0.025
     activation = "gelu"
     dim_feedforward = 2048
-    num_encoder_layers = 2
     num_decoder_layers = 1
     last_embed_dim = 512
-    num_buy_categories = 16
-    num_buy_skus = 3
+    num_buy_categories = 100
+    num_buy_skus = 100
 
     # 训练配置
     batch_size: int = 128

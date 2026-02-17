@@ -18,7 +18,7 @@ TARGET_DIR = os.path.join(DATASET_DIR, "target")
 ONLY_RELEVANT_CLIENTS = True
 
 
-TARGET_TARGET_START = datetime(2022, 10, 13, 0, 0, 0)
+TRAIN_TARGET_START = datetime(2022, 10, 13, 0, 0, 0)
 VALID_TARGET_START = datetime(2022, 10, 27, 0, 0, 0)
 TARGET_END_DATETIME = datetime(2022, 11, 11, 0, 0, 0)
 
@@ -87,12 +87,11 @@ STATS_COLS = [
 
 class EventType(Enum):
     PAD_IDX = 0
-    MASK = 1
-    PRODUCT_BUY = 2
-    ADD_TO_CART = 3
-    REMOVE_FROM_CART = 4
-    PAGE_VISIT = 5
-    SEARCH_QUERY = 6
+    PRODUCT_BUY = 1
+    ADD_TO_CART = 2
+    REMOVE_FROM_CART = 3
+    PAGE_VISIT = 4
+    SEARCH_QUERY = 5
 
 
 def filter_by_client_id(df, client_ids):
@@ -295,77 +294,6 @@ def save_dataframe(df, save_dir):
         save_path = os.path.join(save_dir, file_name)
         np.save(save_path, array)
 
-def create_positive_samples(
-        agg_product_buy_df: pl.DataFrame,
-        all_client_ids: np.ndarray,
-        sku2id_mapping: dict,
-        product_prop_df: pl.DataFrame,
-        dataset_type
-) :
-    SKU_CATID_MAPPING_PATH = os.path.join(MAPPING_DIR, "sku2catid_mapping.json")
-    buy_map = {row["client_id"]: row["buy_sku"] for row in agg_product_buy_df.iter_rows(named=True)}
-
-
-    if dataset_type == 'train':
-        print("Generatng SKU Mapping (Train Mode)...")
-        # sku_to_cat_map = \
-        #     product_prop_df.select(['sku', pl.col("category_id")]).unique().to_pandas().set_index(
-        #         'sku')['category_id'].to_dict()
-
-        sku_to_cat_map = dict(
-            product_prop_df
-            .select([
-                pl.col('sku').cast(pl.Int64),
-                pl.col('category_id')
-            ])
-            .unique()
-            .iter_rows())
-
-        with open(SKU_CATID_MAPPING_PATH, 'w') as f:
-            json.dump(sku_to_cat_map, f)
-    else:
-        print("Loading SKU Mapping (Valid Mode)...")
-        if not os.path.exists(SKU_CATID_MAPPING_PATH):
-            raise FileNotFoundError(
-                f"Mapping file not found at {SKU_CATID_MAPPING_PATH}. Please run with --dataset_type train first.")
-
-        with open(SKU_CATID_MAPPING_PATH, 'r') as f:
-            sku_to_cat_map = json.load(f)
-            sku_to_cat_map = {int(k): v for k, v in sku_to_cat_map.items()}
-
-    client_ids = []
-    pos_sku_ids_list = []
-    pos_cat_ids_list = []
-
-    for client_id in tqdm(all_client_ids, desc="Creating Pos/Neg/Churn Samples"):
-        buy_sku_original = buy_map.get(client_id)
-
-        if buy_sku_original is not None and len(buy_sku_original) > 0:
-            pos_sku_ids_mapped = [sku2id_mapping.get(sku, 2) for sku in buy_sku_original]
-            pos_sku_ids = list(set([sku_id for sku_id in pos_sku_ids_mapped if sku_id >= 3]))
-            pos_cat_ids_mapped = [sku_to_cat_map.get(sku) for sku in buy_sku_original]
-            pos_cat_ids = list(set([cat_id for cat_id in pos_cat_ids_mapped if cat_id >= 2]))
-
-            client_ids.append(client_id)
-            pos_sku_ids_list.append(pos_sku_ids)
-            pos_cat_ids_list.append(pos_cat_ids)
-
-
-    data = {
-        "client_id": client_ids,
-        "pos_sku_ids": pos_sku_ids_list,
-        "pos_cat_ids": pos_cat_ids_list,
-    }
-
-    schema = {
-        "client_id": pl.Int64,
-        "pos_sku_ids": pl.List(pl.Int64),
-        "pos_cat_ids": pl.List(pl.Int64),
-    }
-
-    label_df = pl.from_dict(data=data, schema=schema)
-    return label_df
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -381,6 +309,7 @@ def main():
 
     os.makedirs(MAPPING_DIR, exist_ok=True)
     SKU_MAPPING_PATH = os.path.join(MAPPING_DIR, "sku2id_mapping.json")
+    CAT_MAPPING_PATH = os.path.join(MAPPING_DIR, "cat2id_mapping.json")
     URL_MAPPING_PATH = os.path.join(MAPPING_DIR, "url2id_mapping.json")
 
 
@@ -388,32 +317,23 @@ def main():
     relevant_client_ids = np.load(os.path.join(DATASET_DIR, "relevant_clients.npy"))
     candidate_sku = np.load(os.path.join(TARGET_DIR, "propensity_sku.npy"))
     candidate_cat = np.load(os.path.join(TARGET_DIR, "propensity_category.npy"))
-    product_prop_df = pl.read_parquet(
-        os.path.join(DATASET_DIR, "product_properties.parquet")
-    )
+    product_prop_df = pl.read_parquet(os.path.join(DATASET_DIR, "product_properties.parquet"))
+
     add_to_cart_df = pl.read_parquet(os.path.join(INPUT_DIR, "add_to_cart.parquet"))
-    add_to_cart_df = filter_by_client_id(add_to_cart_df, relevant_client_ids)
     page_visit_df = pl.read_parquet(os.path.join(INPUT_DIR, "page_visit.parquet"))
-    page_visit_df = filter_by_client_id(page_visit_df, relevant_client_ids)
     product_buy_df = pl.read_parquet(os.path.join(INPUT_DIR, "product_buy.parquet"))
-    product_buy_df = filter_by_client_id(product_buy_df, relevant_client_ids)
-    remove_from_cart_df = pl.read_parquet(
-        os.path.join(INPUT_DIR, "remove_from_cart.parquet")
-    )
-    remove_from_cart_df = filter_by_client_id(remove_from_cart_df, relevant_client_ids)
+    remove_from_cart_df = pl.read_parquet(os.path.join(INPUT_DIR, "remove_from_cart.parquet"))
     search_query_df = pl.read_parquet(os.path.join(INPUT_DIR, "search_query.parquet"))
-    search_query_df = filter_by_client_id(search_query_df, relevant_client_ids)
 
     # 2. make user stats data
     candidate_price = np.arange(100)
 
-    buy_with_prop_df = product_buy_df.join(product_prop_df, on="sku", how="inner")
-    add_with_prop_df = add_to_cart_df.join(product_prop_df, on="sku", how="inner")
-    remove_with_prop_df = remove_from_cart_df.join(
-        product_prop_df, on="sku", how="inner"
-    )
+    buy_with_prop_df = product_buy_df.join(product_prop_df, on="sku", how="left")
+    add_with_prop_df = add_to_cart_df.join(product_prop_df, on="sku", how="left")
+    remove_with_prop_df = remove_from_cart_df.join(product_prop_df, on="sku", how="left")
+
     LAST_TIMESTAMP = (
-        TARGET_TARGET_START if dataset_type == "train" else VALID_TARGET_START
+        TRAIN_TARGET_START if dataset_type == "train" else VALID_TARGET_START
     )
     add_stats_df = calc_sku_statistical_feature(
         add_with_prop_df,
@@ -473,15 +393,19 @@ def main():
     del add_stats_df, buy_stats_df, remove_stats_df, visit_stats_df, search_stats_df
 
     # 3. Mapping original id
-    # Mapping starts from 3 (PAD_IDX=0, MASK=1, UNK=2)
-    start_id = 3
+    start_id = 1
     if dataset_type == 'train':
         print("Generatng SKU Mapping (Train Mode)...")
         mapping_skus = np.sort(product_prop_df["sku"].unique().to_numpy())
         sku2id_mapping = {int(sku_id): i for i, sku_id in enumerate(mapping_skus, start=start_id)}
 
+        mapping_cats = np.sort(product_prop_df["category"].unique().to_numpy())
+        cat2id_mapping = {int(cat_id): i for i, cat_id in enumerate(mapping_cats, start=start_id)}
+
         with open(SKU_MAPPING_PATH, 'w') as f:
             json.dump(sku2id_mapping, f)
+        with open(CAT_MAPPING_PATH, 'w') as f:
+            json.dump(cat2id_mapping, f)
     else:
         print("Loading SKU Mapping (Valid Mode)...")
         if not os.path.exists(SKU_MAPPING_PATH):
@@ -492,17 +416,21 @@ def main():
             loaded_sku_map = json.load(f)
             sku2id_mapping = {int(k): v for k, v in loaded_sku_map.items()}
 
+        with open(CAT_MAPPING_PATH, 'r') as f:
+            loaded_cat_map = json.load(f)
+            cat2id_mapping = {int(k): v for k, v in loaded_cat_map.items()}
+
     product_buy_df = product_buy_df.with_columns(
-        pl.col("sku").replace(sku2id_mapping, default=2).alias("sku_id")
+        pl.col("sku").replace(sku2id_mapping, default=0).alias("sku_id")
     )
     add_to_cart_df = add_to_cart_df.with_columns(
-        pl.col("sku").replace(sku2id_mapping, default=2).alias("sku_id")
+        pl.col("sku").replace(sku2id_mapping, default=0).alias("sku_id")
     )
     remove_from_cart_df = remove_from_cart_df.with_columns(
-        pl.col("sku").replace(sku2id_mapping, default=2).alias("sku_id")
+        pl.col("sku").replace(sku2id_mapping, default=0).alias("sku_id")
     )
 
-    # Mapping starts from 3 (PAD_IDX=0, MASK=1, UNK=2)
+    start_id = 2
     if dataset_type == 'train':
         print("Generating URL Mapping (Train Mode)...")
         pv_for_mapping_df = pl.read_parquet(os.path.join(DATASET_DIR, "page_visit.parquet"))
@@ -530,16 +458,15 @@ def main():
             loaded_url_map = json.load(f)
             url2id_mapping = {int(k): v for k, v in loaded_url_map.items()}
     page_visit_df = page_visit_df.with_columns(
-        pl.col("url").replace(url2id_mapping, default=2).alias("url_id")
+        pl.col("url").replace(url2id_mapping, default=1).alias("url_id")
     )
 
     product_prop_df = product_prop_df.with_columns(
-        pl.col("sku").replace(sku2id_mapping, default=2).alias("sku_id"),
-        (pl.col("category") + 2).alias("category_id"),
-        (pl.col("price") + 2).alias("price_id"),
+        pl.col("sku").replace(sku2id_mapping, default=0).alias("sku_id"),
+        pl.col("category").replace(cat2id_mapping, default=0).alias("category_id"),
+        (pl.col("price") + 1).alias("price_id"),
     )
 
-    # Mapping starts from 3 (PAD_IDX=0, MASK=1, UNK=2)
     # Convert string to list[pl.int64]
     search_query_df = search_query_df.with_columns(
         pl.col("query")
@@ -549,7 +476,7 @@ def main():
     )
 
     # Adding 2 to word_ids for PAD_IDX and MASK
-    query_id_offset = 2
+    query_id_offset = 1
     search_query_df = search_query_df.with_columns(
         pl.col("word_ids").list.eval(pl.element() + query_id_offset)
     )
@@ -575,20 +502,20 @@ def main():
         "category_id",
         "price_id",
     ]
-    add_to_cart_df = add_to_cart_df.join(product_prop_df, on="sku_id", how="inner")
+    add_to_cart_df = add_to_cart_df.join(product_prop_df, on="sku_id", how="left")
     add_to_cart_df = add_to_cart_df.with_columns(
         pl.lit(EventType.ADD_TO_CART.value).alias("event_type"),
         pl.lit(0).alias("url_id").cast(pl.Int64),
     ).select(target_cols)
 
-    product_buy_df = product_buy_df.join(product_prop_df, on="sku_id", how="inner")
+    product_buy_df = product_buy_df.join(product_prop_df, on="sku_id", how="left")
     product_buy_df = product_buy_df.with_columns(
         pl.lit(EventType.PRODUCT_BUY.value).alias("event_type"),
         pl.lit(0).alias("url_id").cast(pl.Int64),
     ).select(target_cols)
 
     remove_from_cart_df = remove_from_cart_df.join(
-        product_prop_df, on="sku_id", how="inner"
+        product_prop_df, on="sku_id", how="left"
     )
     remove_from_cart_df = remove_from_cart_df.with_columns(
         pl.lit(EventType.REMOVE_FROM_CART.value).alias("event_type"),
@@ -621,18 +548,10 @@ def main():
         ]
     )
 
-    event_df = event_df.with_columns(
-        pl.col("timestamp").min().over("client_id").alias("min_ts")
-    ).with_columns(
-        (pl.col("timestamp") - pl.col("min_ts")).dt.total_seconds().floordiv(86400.0)
-        .alias("norm_timestamp")
-    ).drop("min_ts")
-
     target_cols = [
         "client_id",
         "event_type",
         "timestamp",
-        "norm_timestamp",
         "sku_id",
         "url_id",
         "word_ids",
@@ -644,7 +563,6 @@ def main():
     input_df = event_df.group_by("client_id").agg(
         [
             pl.col("timestamp").sort(),
-            pl.col("norm_timestamp").sort_by("timestamp"),
             pl.col("event_type").sort_by("timestamp"),
             pl.col("sku_id").sort_by("timestamp"),
             pl.col("url_id").sort_by("timestamp"),
@@ -716,33 +634,10 @@ def main():
         pl.col("contain_buy_sku_label").fill_null(pl.lit(0)),
         pl.col("contain_buy_cat_label").fill_null(pl.lit(0)),
     )
-    all_df = all_df.join(stats_df, on="client_id", how="inner")
+    all_df = all_df.join(stats_df, on="client_id", how="left")
     all_df = all_df.sort(by="client_id")
     save_dir = os.path.join(SAVE_DIR, dataset_type)
     save_dataframe(all_df, save_dir)
-
-    label_df = create_positive_samples(
-        target_df,
-        relevant_client_ids,
-        sku2id_mapping,
-        product_prop_df,
-        dataset_type
-    )
-
-    all_df = input_df.join(label_df, on="client_id", how="inner")
-
-    all_df = all_df.with_columns(
-        pl.col("pos_sku_ids").fill_null(pl.lit([])).alias("pos_sku_ids"),
-        pl.col("pos_cat_ids").fill_null(pl.lit([])).alias("pos_cat_ids"),
-    )
-
-    all_df = all_df.join(stats_df, on="client_id", how="inner")
-    all_df = all_df.sort(by="client_id")
-    del input_df, label_df, stats_df
-
-    save_dir = os.path.join('./dataset', dataset_type)
-    save_dataframe(all_df, save_dir)
-
 
 if __name__ == "__main__":
     main()

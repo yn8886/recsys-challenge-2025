@@ -15,9 +15,12 @@ from torch import Tensor, optim
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics.classification import AUROC
 from config import Config
+from model import WordEmbedding, PositionalEncoding, HSTUBlock
+
 
 NUM_CANDIDATES_SKU = 100
 NUM_CANDIDATES_CAT = 100
+NUM_CANDIDATES_PRICE = 100
 
 exp_name = os.path.splitext(os.path.basename(__file__))[0]
 torch.backends.cudnn.benchmark = True
@@ -27,12 +30,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class EventType(Enum):
+    # 0はpad_idx、1はmask
     PAD_IDX = 0
-    PRODUCT_BUY = 1
-    ADD_TO_CART = 2
-    REMOVE_FROM_CART = 3
-    PAGE_VISIT = 4
-    SEARCH_QUERY = 5
+    MASK = 1
+    PRODUCT_BUY = 2
+    ADD_TO_CART = 3
+    REMOVE_FROM_CART = 4
+    PAGE_VISIT = 5
+    SEARCH_QUERY = 6
+
 
 class RecsysDatasetV12(Dataset):
     def __init__(self, dataset_dir, max_len=128, mask_rate=0.2):
@@ -128,6 +134,29 @@ class RecsysDatasetV12(Dataset):
 
         return padded_seq, padding_length
 
+    def _mask_sequence(self, seq, padding_length):
+        non_pad_indices = self.indexes_template[padding_length:]
+
+        n_replace = int(len(non_pad_indices) * self.mask_rate)
+
+        replace_indices = np.random.choice(
+            non_pad_indices, size=n_replace, replace=False
+        )
+
+        seq[replace_indices] = self.item_mask_template
+        return seq
+
+    def _mask_word_sequence(self, seq, padding_length):
+        non_pad_indices = self.indexes_template[padding_length:]
+
+        n_replace = int(len(non_pad_indices) * self.mask_rate)
+
+        replace_indices = np.random.choice(
+            non_pad_indices, size=n_replace, replace=False
+        )
+        seq[replace_indices] = self.word_mask_template
+        return seq
+
     def __getitem__(self, idx):
         # sequence features
         client_id = self.client_ids[idx]
@@ -183,97 +212,7 @@ class RecsysDatasetV12(Dataset):
             "is_contain_buy_cat": is_contain_buy_cat,
         }
 
-
         return return_dict
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=50):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
-        self.register_buffer("pe", pe)
-
-    def forward(self, x):
-        """
-        Args:
-            x: Tensor, shape [batch_size, seq_len, embedding_dim]
-        """
-        x = x + self.pe[:, : x.size(1), :]
-        return self.dropout(x)
-
-
-class WordEmbedding(nn.Module):
-    def __init__(self, num_word, word_emb_dim, padding_idx=0):
-        super().__init__()
-
-        self.word_emb_layer = nn.Embedding(
-            num_embeddings=num_word,
-            embedding_dim=word_emb_dim,
-            padding_idx=padding_idx,
-        )
-
-    def forward(self, word_ids):
-        word_emb = self.word_emb_layer(word_ids)
-        avg_word_emb = torch.mean(word_emb, dim=-2)
-        return avg_word_emb
-
-
-class SkuEmbedding(nn.Module):
-    def __init__(
-        self,
-        num_sku,
-        sku_emb_dim,
-        num_cat,
-        cat_emb_dim,
-        num_price,
-        price_emb_dim,
-        word_emb_dim,
-        word_emb_layer,
-        item_emb_dim,
-        padding_idx=0,
-    ):
-        super().__init__()
-        self.sku_emb_layer = nn.Embedding(
-            num_embeddings=num_sku,
-            embedding_dim=sku_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.cat_emb_layer = nn.Embedding(
-            num_embeddings=num_cat,
-            embedding_dim=cat_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.price_emb_layer = nn.Embedding(
-            num_embeddings=num_price,
-            embedding_dim=price_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.word_emb_layer = word_emb_layer
-
-        self.fc1 = nn.Linear(
-            sku_emb_dim + cat_emb_dim + price_emb_dim + word_emb_dim,
-            item_emb_dim,
-        )
-        self.relu = nn.ReLU()
-
-    def forward(self, sku_id, cat_id, price_id, word_ids):
-        sku_emb = self.sku_emb_layer(sku_id)
-        cat_emb = self.cat_emb_layer(cat_id)
-        price_emb = self.price_emb_layer(price_id)
-        word_emb = self.word_emb_layer(word_ids)
-        concat_emb = torch.cat([sku_emb, cat_emb, price_emb, word_emb], dim=-1)
-        item_emb = self.fc1(concat_emb)
-        item_emb = self.relu(item_emb)
-        return item_emb
 
 
 class StaticFeatureMLP(nn.Module):
@@ -309,163 +248,125 @@ class FusionModule(nn.Module):
 
 
 class BehaviorSequenceTransformer(nn.Module):
-    def __init__(self, cfg, dtype=torch.float):
+    def __init__(self, config):
         super().__init__()
-        self.cfg = cfg
-        self.padding_idx = cfg.padding_idx
-        self.device = cfg.device
-        self.d_model = (
-            cfg.event_emb_dim + cfg.item_emb_dim
-        )
-        self.dtype = dtype
+        self.config = config
+        self.padding_idx = config.padding_idx
+        self.device = config.device
+        self.d_model = config.item_emb_dim + config.event_emb_dim + config.sku_emb_dim + config.url_emb_dim + config.cat_emb_dim + config.price_emb_dim
 
-        self.event_emb_layer = nn.Embedding(
-            num_embeddings=cfg.num_event,
-            embedding_dim=cfg.event_emb_dim,
-            padding_idx=self.padding_idx,
-        )
+        self.event_embedding = nn.Embedding(config.num_event, config.event_emb_dim, padding_idx=0)
+        self.sku_embedding = nn.Embedding(config.num_sku, config.sku_emb_dim, padding_idx=0)
+        self.category_embedding = nn.Embedding(config.num_cat, config.cat_emb_dim, padding_idx=0)
+        self.price_embedding = nn.Embedding(config.num_price, config.price_emb_dim, padding_idx=0)
+        self.url_embedding = nn.Embedding(config.num_url, config.url_emb_dim, padding_idx=0)
 
-        self.word_emb_layer = WordEmbedding(
-            num_word=cfg.num_word,
-            word_emb_dim=cfg.item_emb_dim,
-            padding_idx=self.padding_idx,
+        self.word_embedding = WordEmbedding(
+            num_word=config.num_word,
+            word_emb_dim=config.item_emb_dim,
+            dropout=config.dropout,
         )
 
-        self.sku_emb_layer = SkuEmbedding(
-            num_sku=cfg.num_sku,
-            sku_emb_dim=cfg.sku_emb_dim,
-            num_cat=cfg.num_cat,
-            cat_emb_dim=cfg.cat_emb_dim,
-            num_price=cfg.num_price,
-            price_emb_dim=cfg.price_emb_dim,
-            word_emb_dim=cfg.item_emb_dim,
-            word_emb_layer=self.word_emb_layer,
-            item_emb_dim=cfg.item_emb_dim,
-            padding_idx=self.padding_idx,
-        )
+        self.feature_encoder = nn.Linear(self.d_model, config.hidden_size)
 
-        self.url_emb_layer = nn.Embedding(
-            num_embeddings=cfg.num_url,
-            embedding_dim=cfg.item_emb_dim,
-            padding_idx=self.padding_idx,
-        )
-
-        self.pos_encoder = PositionalEncoding(
-            d_model=self.d_model,
-            dropout=cfg.dropout,
-            max_len=cfg.max_len,
-        )
-        self.trm_enc_layer = nn.TransformerEncoderLayer(
-            d_model=self.d_model,
-            nhead=cfg.num_heads,
-            dim_feedforward=cfg.item_emb_dim * 4,
-            dropout=cfg.dropout,
-            batch_first=True,
-        )
-        self.trm_enc = nn.TransformerEncoder(
-            self.trm_enc_layer, num_layers=cfg.num_layers
-        )
-
-        # B = cfg.batch_size
-        # S = cfg.max_len
-
-        # self.template_agg_embeddings = torch.zeros(
-        #     (B, S, self.cfg.item_emb_dim), dtype=self.dtype, device=self.device
+        # self.relative_attention_bias = RelativeBucketedTimeAndPositionBasedBias(
+        #     max_seq_len=config.max_seq_length,
+        #     num_buckets=config.time_buckets,
+        #     bucketization_fn=lambda x: (
+        #             torch.log(torch.abs(x).clamp(min=1)) / 0.69314718056  # Using ln(2)
+        #     ).long(),
         # )
 
+        if not config.use_hstu:
+            self.pos_encoder = PositionalEncoding(
+                d_model=config.hidden_size,
+                dropout=config.dropout,
+                max_len=config.max_seq_length,
+            )
+            self.trm_enc_layer = nn.TransformerEncoderLayer(
+                d_model=config.hidden_size,
+                nhead=config.num_heads,
+                dim_feedforward=config.hidden_size * 4,
+                dropout=config.dropout,
+                batch_first=True,
+            )
+            self.model = nn.TransformerEncoder(
+                self.trm_enc_layer, num_layers=config.num_layers
+            )
+        else:
+            self.attention_layernorms = torch.nn.ModuleList()  # to be Q for self-attention
+            self.attention_layers = torch.nn.ModuleList()
+            self.forward_layernorms = torch.nn.ModuleList()
+            self.forward_layers = torch.nn.ModuleList()
 
-    def _generate_padding_mask(self, seq):
-        mask = seq == self.padding_idx
-        return mask  # (batch_size, seq_len)
+            self.last_layernorm = torch.nn.RMSNorm(config.hidden_size, eps=1e-8)
 
-    def _aggregate_embeddings(
-        self,
-        event_type,
-        sku_id,
-        url_id,
-        cat_id,
-        price_id,
-        word_id,
-    ):
-        B, S = event_type.shape
+            for _ in range(config.num_layers):
+                new_attn_layernorm = torch.nn.RMSNorm(config.hidden_size, eps=1e-8)
+                self.attention_layernorms.append(new_attn_layernorm)
 
-        agg_embeddings = torch.zeros(
-            (B, S, self.cfg.item_emb_dim),
-            dtype=self.dtype,
-            device=event_type.device
-        )
+                new_attn_layer = HSTUBlock(config.hidden_size, config.num_heads, config.dropout, config.max_seq_length)
+                self.attention_layers.append(new_attn_layer)
 
-        sku_pos_idx = (
-            (event_type == EventType.ADD_TO_CART.value)
-            | (event_type == EventType.PRODUCT_BUY.value)
-            | (event_type == EventType.REMOVE_FROM_CART.value)
-        )
-
-
-        sku_id = sku_id[sku_pos_idx]
-        cat_id = cat_id[sku_pos_idx]
-        price_id = price_id[sku_pos_idx]
-        sku_word_id = word_id[sku_pos_idx]
-        x = self.sku_emb_layer(sku_id, cat_id, price_id, sku_word_id)
-        agg_embeddings[sku_pos_idx, :] = x
-
-        url_pos_idx = event_type == EventType.PAGE_VISIT.value
-        url_id = url_id[url_pos_idx]
-        agg_embeddings[url_pos_idx, :] = self.url_emb_layer(url_id)
-
-        query_pos_idx = event_type == EventType.SEARCH_QUERY.value
-        query_word_id = word_id[query_pos_idx]
-        agg_embeddings[query_pos_idx, :] = self.word_emb_layer(query_word_id)
-
-        return agg_embeddings
-
-    def compute_user_embedding(
-        self,
-        event_type,
-        sku_id,
-        url_id,
-        cat_id,
-        price_id,
-        word_id,
-    ):
-        src_padding_mask = self._generate_padding_mask(event_type)
-        event_type_seq_emb = self.event_emb_layer(event_type)
-        event_content_seq_emb = self._aggregate_embeddings(
-            event_type,
-            sku_id,
-            url_id,
-            cat_id,
-            price_id,
-            word_id,
-        )
-
-        seq_emb = torch.concat(
-            [event_type_seq_emb, event_content_seq_emb],
-            dim=-1,
-        )
-        seq_emb = self.pos_encoder(seq_emb)
-        trm_enc_out = self.trm_enc(seq_emb, src_key_padding_mask=src_padding_mask)
-
-        user_emb = trm_enc_out[:, -1, :]
-        return user_emb
+                # new_fwd_layernorm = torch.nn.RMSNorm(args.hidden_units, eps=1e-8)
+                # self.forward_layernorms.append(new_fwd_layernorm)
+                #
+                # new_fwd_layer = PointWiseFeedForward(args.hidden_units, args.dropout_rate)
+                # self.forward_layers.append(new_fwd_layer)
 
     def forward(
         self,
-        event_type,
-        sku_id,
-        url_id,
-        cat_id,
-        price_id,
-        word_id,
+        event_types,
+        sku_ids,
+        url_ids,
+        cat_ids,
+        price_ids,
+        word_ids,
+        timestamp,
     ):
-        user_emb = self.compute_user_embedding(
-            event_type,
-            sku_id,
-            url_id,
-            cat_id,
-            price_id,
-            word_id,
-        )
+        mask = event_types == self.padding_idx
+
+        event_emb = self.event_embedding(event_types)
+        cat_emb = self.category_embedding(cat_ids)
+        price_emb = self.price_embedding(price_ids)
+        word_emb = self.word_embedding(word_ids)
+        sku_emb = self.sku_embedding(sku_ids)
+        url_emb = self.url_embedding(url_ids)
+
+        # 计算特征重要性 - 添加数值稳定性 - 现在包含Item ID和URL特征
+        features = [event_emb, cat_emb, price_emb, word_emb, sku_emb, url_emb]
+        features = torch.cat(features, dim=2)
+        feature_embeddings = self.feature_encoder(features)
+
+        if not self.config.use_hstu:
+            feature_embeddings = self.pos_encoder(feature_embeddings)
+            enc_out = self.model(feature_embeddings, src_key_padding_mask=mask)
+            user_emb = enc_out[:, -1, :]
+        else:
+            maxlen = event_types.shape[1]
+            ones_matrix = torch.ones((maxlen, maxlen), dtype=torch.bool, device=self.device)
+            attention_mask_tril = torch.tril(ones_matrix)
+            attention_mask_pad = (~mask).to(self.device)
+            attention_mask = attention_mask_tril.unsqueeze(0) & attention_mask_pad.unsqueeze(1)
+
+            for i in range(len(self.attention_layers)):
+                x = self.attention_layernorms[i](feature_embeddings)
+                mha_outputs = self.attention_layers[i](x, timestamp, attention_mask)
+                feature_embeddings = feature_embeddings + mha_outputs
+                # feature_embeddings = feature_embeddings + self.forward_layers[i](self.forward_layernorms[i](feature_embeddings))
+
+            seq_feat_emb = self.last_layernorm(feature_embeddings)
+            last = seq_feat_emb[:, -1, :].squeeze(1)  # [B, H]
+
+            # 平均池化
+            lengths = (~mask).sum(dim=1).to(torch.int32)
+            mask_f = (~mask).float().unsqueeze(-1)  # [B, T, 1]
+            sum_emb = (seq_feat_emb * mask_f).sum(dim=1)  # [B, H]
+            avg = sum_emb / lengths.unsqueeze(1)  # [B, H]
+            # 融合
+            user_emb = 0.5 * (last + avg)
+            # L2 normalize pooled user embedding
+            # user_emb = F.normalize(seq_feat_emb, p=2, dim=-1)
 
         return user_emb
 
@@ -591,25 +492,10 @@ class PLE(nn.Module):
         self.churn_tower = MultiLayerPerceptoron(
             expert_output_dim, task_tower_hidden_dims, output_dim=1, dropout=0.1
         )
-        self.add_tower = MultiLayerPerceptoron(
-            expert_output_dim, task_tower_hidden_dims, output_dim=1, dropout=0.1
-        )
         self.buy_sku_tower = MultiLayerPerceptoron(
             expert_output_dim, task_tower_hidden_dims, output_dim=100, dropout=0.1
         )
         self.buy_cat_tower = MultiLayerPerceptoron(
-            expert_output_dim, task_tower_hidden_dims, output_dim=100, dropout=0.1
-        )
-        self.buy_price_tower = MultiLayerPerceptoron(
-            expert_output_dim, task_tower_hidden_dims, output_dim=100, dropout=0.1
-        )
-        self.add_sku_tower = MultiLayerPerceptoron(
-            expert_output_dim, task_tower_hidden_dims, output_dim=100, dropout=0.1
-        )
-        self.add_cat_tower = MultiLayerPerceptoron(
-            expert_output_dim, task_tower_hidden_dims, output_dim=100, dropout=0.1
-        )
-        self.add_price_tower = MultiLayerPerceptoron(
             expert_output_dim, task_tower_hidden_dims, output_dim=100, dropout=0.1
         )
 
@@ -688,15 +574,10 @@ class LightningRecsysModel(L.LightningModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.d_model = (
-                cfg.event_emb_dim + cfg.item_emb_dim
-        )
 
-        self.user_emb_dim = cfg.fusion_mlp_output_dim
-        self.fusion_mlp_input_dim = self.d_model + cfg.static_features_dim
+        self.encoder = BehaviorSequenceTransformer(cfg)
 
-        self.encoder = BehaviorSequenceTransformer(cfg, self.dtype)
-
+        self.fusion_mlp_input_dim = cfg.hidden_size + cfg.static_features_dim
         self.fusion_mlp = FusionModule(
             input_dim=self.fusion_mlp_input_dim,
             hidden1_dim=cfg.fusion_mlp_hidden_dim,
@@ -705,7 +586,7 @@ class LightningRecsysModel(L.LightningModule):
         )
 
         self.ple = PLE(
-            user_emb_dim=self.user_emb_dim,
+            user_emb_dim=cfg.fusion_mlp_output_dim,
             num_shared_experts=cfg.num_shared_experts,
             num_task_experts=cfg.num_task_experts,
             num_tasks=cfg.num_tasks,
@@ -740,7 +621,7 @@ class LightningRecsysModel(L.LightningModule):
         statistical_features,
     ):
         seq_feat_emb = self.encoder(
-            event_type, sku_id, url_id, cat_id, price_id, word_id
+            event_type, sku_id, url_id, cat_id, price_id, word_id, timestamp
         )
 
         concat_feat = torch.concat(
@@ -1015,9 +896,24 @@ def main():
         help="Device ID",
     )
     parser.add_argument(
+        "--use-hstu",
+        type=bool,
+        default=True,
+    )
+    parser.add_argument(
+        "--num-layers",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=512,
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
-        default=0,
+        default=1,
         help="Number of workers for data loading",
     )
     parser.add_argument(
@@ -1042,6 +938,9 @@ def main():
     device = f"cuda:{args.devices}" if args.accelerator == "cuda" else "cpu"
     config = Config(
         batch_size=args.batch_size,
+        use_hstu=args.use_hstu,
+        num_layers=args.num_layers,
+        hidden_size=args.hidden_size,
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
         accelerator=args.accelerator,
@@ -1053,8 +952,8 @@ def main():
     train_dataset_dir = os.path.join(args.data_dir, "train")
     valid_dataset_dir = os.path.join(args.data_dir, "valid")
 
-    train_dataset = RecsysDatasetV12(dataset_dir=train_dataset_dir, max_len=config.max_len)
-    valid_dataset = RecsysDatasetV12(dataset_dir=valid_dataset_dir, max_len=config.max_len)
+    train_dataset = RecsysDatasetV12(dataset_dir=train_dataset_dir, max_len=config.max_seq_length)
+    valid_dataset = RecsysDatasetV12(dataset_dir=valid_dataset_dir, max_len=config.max_seq_length)
 
     print(f"train_size : {len(train_dataset)}")
     print(f"valid_size : {len(valid_dataset)}")
@@ -1091,7 +990,6 @@ def main():
 
     trainer = L.Trainer(
         callbacks=[checkpoint_callback, model_summary],
-        strategy="ddp_find_unused_parameters_true",
         # logger=wandb_logger,
         accelerator=args.accelerator,
         max_epochs=config.num_epochs,

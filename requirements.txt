@@ -1,0 +1,13 @@
+lightning
+pandas
+scikit_learn
+transformers
+einops
+tensorboard
+pyarrow
+polars
+modelscope
+addict
+ftfy
+timm
+schedulefree

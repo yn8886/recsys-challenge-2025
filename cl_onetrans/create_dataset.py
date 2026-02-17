@@ -262,7 +262,7 @@ def save_dataframe(df, save_dir):
     print(f"Saveing {file_name}")
     np.save(save_path, scaled_stats_features)
 
-    df = df.drop(STATS_COLS)
+    df = df.drop(CANDIDATES_STATS_COLS + STATS_COLS)
     col_names = df.columns
 
     for col_name in col_names:
@@ -276,7 +276,7 @@ def main():
     parser.add_argument(
         "--dataset_type",
         type=str,
-        default="valid",
+        default="train",
         choices=["train", "valid"],
     )
 
@@ -646,13 +646,15 @@ def main():
     ])
 
     all_df = all_df.with_columns(
-        pl.col("target_event_type").fill_null(pl.lit([0])),
-        pl.col("target_sku_id").fill_null(pl.lit([0])),
-        pl.col("target_price_id").fill_null(pl.lit([0])),
-        pl.col("target_url_id").fill_null(pl.lit([0])),
+        pl.col("target_event_type").fill_null(pl.lit(0)),
+        pl.col("target_sku_id").fill_null(pl.lit(0)),
+        pl.col("target_price_id").fill_null(pl.lit(0)),
+        pl.col("target_url_id").fill_null(pl.lit(0)),
         pl.col("target_word_ids").fill_null(pl.lit([[0] * 16])),
-        pl.col("target_category_id").fill_null(pl.lit([0])),
+        pl.col("target_category_id").fill_null(pl.lit(0)),
     )
+
+    all_df.write_parquet(os.path.join(DATASET_DIR, "all_data.parquet"))
 
     save_dir = os.path.join(SAVE_DIR, dataset_type)
     all_df = all_df.join(stats_df, on="client_id", how="left")

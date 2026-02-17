@@ -30,30 +30,26 @@ class Config:
     cat_emb_dim = 96
     price_emb_dim = 16
     word_emb_dim = 384
-
-    use_time = True
-    timestamp_dim = 256
-    num_timestamp_bins = 256
-
+    
     # 行为类型配置
     dropout= 0.2
-    num_heads = 8
+    num_heads = 4
+    num_shared_experts = 4
+    num_task_experts = 4
+    num_tasks = 3
+    expert_hidden_dims = [256]
+    expert_output_dim = 128
+    task_tower_hidden_dims = [128]
+    task_tower_dropout = 0.1
     churn_loss_weight = 0.025
-    activation = "gelu"
-    dim_feedforward = 2048
-    num_encoder_layers = 2
-    num_decoder_layers = 1
-    last_embed_dim = 512
-    num_buy_categories = 16
-    num_buy_skus = 3
 
     # 训练配置
     batch_size: int = 128
     num_epochs: int = 3
     learning_rate: float = 1e-3
     mask_rate = 0.2
+    temperature = 0.1
     padding_idx = 0
-    temperature = 0.02
 
     # 设备配置
     accelerator: str = "cuda"
