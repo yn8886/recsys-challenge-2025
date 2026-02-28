@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
+from fuxictr.pytorch.layers import MLP_Block
 
 # -----------------------------------------------------------------------------
 # 1. 基础组件 (保持不变或微调)
@@ -120,9 +120,11 @@ class MixedCausalAttention(nn.Module):
 
         attention_mask_tril = torch.tril(torch.ones((L_k, L_k), dtype=torch.bool, device=x.device))
         attn_mask = attention_mask_tril[-L_q:, :]
-        key_padding_mask = (1.0 - key_padding_mask).bool().to(x.device)
+        # key_padding_mask = (1.0 - key_padding_mask).bool().to(x.device)
+        key_padding_mask = key_padding_mask.bool().to(x.device)
         attention_mask = attn_mask.unsqueeze(0) & key_padding_mask.unsqueeze(1)
 
+        t = attention_mask[0, :, :]
         # 计算 Attention Score
         attn_weights = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
         # attn_weights = attn_weights + rel_bias
@@ -224,7 +226,11 @@ class OneTransModel(nn.Module):
                  num_heads=4,
                  ns_len=10,
                  seq_len=64,
-                 ns_input_dim=64):
+                 ns_input_dim=64,
+                 last_embed_dim=256,
+                 mlp_hidden_units=[256],
+                 dropout=0.1,
+                 ):
         super().__init__()
 
         self.ns_len = ns_len
@@ -244,6 +250,15 @@ class OneTransModel(nn.Module):
             for _ in range(num_layers)
         ])
 
+        self.final_mlp = MLP_Block(
+            input_dim=d_model,
+            output_dim=last_embed_dim,
+            hidden_units=mlp_hidden_units,
+            hidden_activations="ReLU",
+            output_activation=None,
+            dropout_rates=dropout
+        )
+
     def forward(self, s_tokens, ns_features, s_padding_mask):
         """
         s_tokens: [B, L_s, D]
@@ -260,7 +275,7 @@ class OneTransModel(nn.Module):
         x = torch.cat([s_tokens, ns_tokens], dim=1)
 
         # 构造初始 Mask (NS Tokens 假设不是 Padding)
-        ns_mask = torch.zeros((B, self.ns_len), device=s_tokens.device, dtype=s_padding_mask.dtype)
+        ns_mask = torch.ones((B, self.ns_len), device=s_tokens.device, dtype=s_padding_mask.dtype)
         current_mask = torch.cat([s_padding_mask, ns_mask], dim=1)  # [B, L_initial]
 
         L_in = x.shape[1]
@@ -295,8 +310,9 @@ class OneTransModel(nn.Module):
         # 取 NS 部分进行最终预测 (通常 Pooling 或者取特定 Token)
         # 此时 x 的长度为 final_seq_len, 其中最后 ns_len 个是 NS tokens
         ns_out = x[:, -self.ns_len:, :]
-        final_emb = torch.mean(ns_out, dim=1)
+        ns_out= torch.mean(ns_out, dim=1)
 
+        final_emb = self.final_mlp(ns_out)
         return final_emb
 
 

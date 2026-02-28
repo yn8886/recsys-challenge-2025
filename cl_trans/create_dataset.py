@@ -59,7 +59,6 @@ STATS_COLS = [
     "unique_url",
     "search_query_flag",
     "unique_search_query",
-
     "all_from_last_to_end_days",
     "min_all_from_first_to_end_days",
     "all_duration_days",

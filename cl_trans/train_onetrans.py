@@ -1,7 +1,6 @@
 import argparse
 import math
 import os
-from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -16,8 +15,9 @@ from schedulefree import RAdamScheduleFree
 from torch import Tensor, optim
 from torch.utils.data import DataLoader, Dataset
 from data_collator import RecsysDatasetV12, EventDataCollatorContrastive
+from embed import PositionalEncoding, WordEmbedding, SkuEmbedding
 from config import Config
-from model import OneTransModel
+from fuxictr.pytorch.layers import MLP_Block
 
 NUM_CANDIDATES_SKU = 100
 NUM_CANDIDATES_CAT = 100
@@ -37,146 +37,252 @@ class EventType(Enum):
     PAGE_VISIT = 4
     SEARCH_QUERY = 5
 
+
+class RMSNorm(nn.Module):
+    def __init__(self, d_model, eps=1e-8):
+        super().__init__()
+        self.scale = nn.Parameter(torch.ones(d_model))
+        self.eps = eps
+
+    def forward(self, x):
+        norm = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return x * norm * self.scale
+
+
+class FFNLayer(nn.Module):
+    def __init__(self, d_model, expansion_factor=2, dropout=0.1):
+        super().__init__()
+        hidden_dim = int(d_model * expansion_factor)
+        self.dense_1 = nn.Linear(d_model, hidden_dim)
+        self.activation = nn.SiLU()
+        self.dense_2 = nn.Linear(hidden_dim, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.dense_2(self.activation(self.dense_1(x))))
+
+
+class MixedCausalAttention(nn.Module):
+    def __init__(self, ns_len, seq_len, d_model, num_heads, dropout=0.1, rope_fraction=1.0,
+                 rope_base=10000.0):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.ns_len = ns_len
+
+        self.q_shared = nn.Linear(d_model, d_model, bias=False)
+        self.k_shared = nn.Linear(d_model, d_model, bias=False)
+        self.v_shared = nn.Linear(d_model, d_model, bias=False)
+
+        self.q_ns = nn.ModuleList([nn.Linear(d_model, d_model, bias=False) for _ in range(ns_len)])
+        self.k_ns = nn.ModuleList([nn.Linear(d_model, d_model, bias=False) for _ in range(ns_len)])
+        self.v_ns = nn.ModuleList([nn.Linear(d_model, d_model, bias=False) for _ in range(ns_len)])
+
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def _apply_mixed_projection(self, x, shared_layer, ns_layers_list):
+        B, L, D = x.shape
+        L_s = L - self.ns_len
+
+        if L_s > 0:
+            s_part = x[:, :L_s, :]
+            s_proj = shared_layer(s_part)
+        else:
+            s_proj = torch.empty(B, 0, D, device=x.device)
+
+        ns_projs = []
+        for i in range(self.ns_len):
+            idx = L_s + i
+            if idx >= 0:
+                ns_projs.append(ns_layers_list[i](x[:, idx: idx + 1, :]))
+
+        if len(ns_projs) > 0:
+            ns_proj = torch.cat(ns_projs, dim=1)
+            return torch.cat([s_proj, ns_proj], dim=1)
+        return s_proj
+
+    def forward(self, x, query_len=None, key_padding_mask=None):
+        B, L_in, _ = x.shape
+        k = self._apply_mixed_projection(x, self.k_shared, self.k_ns)
+        v = self._apply_mixed_projection(x, self.v_shared, self.v_ns)
+
+        q_full = self._apply_mixed_projection(x, self.q_shared, self.q_ns)
+
+        if query_len is not None and query_len < L_in:
+            q = q_full[:, -query_len:, :]  # 只取最后 query_len 个
+        else:
+            q = q_full
+
+        L_q = q.shape[1]
+        L_k = k.shape[1]  # L_k == L_in
+
+        # Multi-head reshape
+        q = q.view(B, L_q, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, L_k, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, L_k, self.num_heads, self.head_dim).transpose(1, 2)
+
+        attention_mask_tril = torch.tril(torch.ones((L_k, L_k), dtype=torch.bool, device=x.device))
+        attn_mask = attention_mask_tril[-L_q:, :]
+        # key_padding_mask = (1.0 - key_padding_mask).bool().to(x.device)
+        key_padding_mask = key_padding_mask.bool().to(x.device)
+        attention_mask = attn_mask.unsqueeze(0) & key_padding_mask.unsqueeze(1)
+
+
+        attn_weights = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        attn_weights = attn_weights.masked_fill(attention_mask.unsqueeze(1).logical_not(), -1e9)
+
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        output = torch.matmul(attn_weights, v)
+        output = output.transpose(1, 2).contiguous().view(B, L_q, self.d_model)
+
+        return self.out_proj(output)
+
+
+class MixedFFN(nn.Module):
+    def __init__(self, ns_len, d_model):
+        super().__init__()
+        self.ns_len = ns_len
+        self.ffn_shared = FFNLayer(d_model)
+        self.ffn_ns = nn.ModuleList([FFNLayer(d_model) for _ in range(ns_len)])
+
+    def forward(self, x):
+        B, L, D = x.shape
+        L_s = L - self.ns_len
+
+        if L_s > 0:
+            s_out = self.ffn_shared(x[:, :L_s, :])
+        else:
+            s_out = torch.empty(B, 0, D, device=x.device)
+
+        # Specific Part
+        ns_outs = []
+        for i in range(self.ns_len):
+            idx = L_s + i
+            if idx >= 0:
+                ns_outs.append(self.ffn_ns[i](x[:, idx: idx + 1, :]))
+
+        if len(ns_outs) > 0:
+            ns_out = torch.cat(ns_outs, dim=1)
+            return torch.cat([s_out, ns_out], dim=1)
+        return s_out
+
+
+class OneTransBlock(nn.Module):
+    def __init__(self, ns_len, seq_len, d_model, num_heads):
+        super().__init__()
+        self.rms_attn = RMSNorm(d_model)
+        self.attn = MixedCausalAttention(ns_len, seq_len, d_model, num_heads)
+        self.rms_ffn = RMSNorm(d_model)
+        self.ffn = MixedFFN(ns_len, d_model)
+
+    def forward(self, x, keep_len=None, mask=None):
+        norm_x = self.rms_attn(x)
+        attn_out = self.attn(norm_x, query_len=keep_len, key_padding_mask=mask)
+
+        if keep_len is not None and keep_len < x.shape[1]:
+            x_residual = x[:, -keep_len:, :]
+        else:
+            x_residual = x
+
+        x = x_residual + attn_out
+
+        norm_x = self.rms_ffn(x)
+        ffn_out = self.ffn(norm_x)
+        x = x + ffn_out
+
+        return x
+
+class OneTransModel(nn.Module):
+    def __init__(
+        self,
+         num_layers=6,
+         final_seq_len=12,
+         d_model=256,
+         num_heads=4,
+         ns_len=10,
+         seq_len=64,
+         ns_input_dim=64,
+         last_embed_dim=256,
+         mlp_hidden_units=[256],
+         dropout=0.1,
+    ):
+        super().__init__()
+
+        self.ns_len = ns_len
+        self.d_model = d_model
+        self.final_seq_len = max(final_seq_len, ns_len)
+        self.num_layers = num_layers
+
+        self.ns_tokenizer = nn.Sequential(
+            nn.Linear(ns_input_dim, ns_len * d_model),
+            nn.SiLU()
+        )
+
+        self.blocks = nn.ModuleList([
+            OneTransBlock(ns_len, seq_len, d_model, num_heads)
+            for _ in range(num_layers)
+        ])
+
+        self.final_mlp = MLP_Block(
+            input_dim=d_model,
+            output_dim=last_embed_dim,
+            hidden_units=mlp_hidden_units,
+            hidden_activations="ReLU",
+            output_activation=None,
+            dropout_rates=dropout
+        )
+
+    def forward(self, s_tokens, ns_features, s_padding_mask):
+        B = s_tokens.shape[0]
+
+        ns_flat = self.ns_tokenizer(ns_features)
+        ns_tokens = ns_flat.view(B, self.ns_len, self.d_model)
+
+        x = torch.cat([s_tokens, ns_tokens], dim=1)
+
+        ns_mask = torch.ones((B, self.ns_len), device=s_tokens.device, dtype=s_padding_mask.dtype)
+        current_mask = torch.cat([s_padding_mask, ns_mask], dim=1)  # [B, L_initial]
+
+        L_in = x.shape[1]
+
+        schedule = []
+        total_drop = L_in - self.final_seq_len
+        for i in range(self.num_layers):
+            drop_amount = int(total_drop * (i + 1) / self.num_layers)
+            target_len = L_in - drop_amount
+            target_len = max(target_len, self.final_seq_len)
+            schedule.append(target_len)
+
+        for i, block in enumerate(self.blocks):
+            target_len = schedule[i]
+            x = block(x, keep_len=target_len, mask=current_mask)
+
+            if target_len < current_mask.shape[1]:
+                current_mask = current_mask[:, -target_len:]
+
+        ns_out = x[:, -self.ns_len:, :]
+        ns_out = torch.mean(ns_out, dim=1)
+        final_emb = self.final_mlp(ns_out)
+
+        return final_emb
+
 @dataclass
 class EventTransformerBoneOutputs:
     pooled_output: torch.Tensor
     last_hidden_state: torch.Tensor
     attention_mask: torch.Tensor
+    moe_loss: torch.Tensor
 
-
-class WordEmbedding(nn.Module):
-    def __init__(self, num_word, word_emb_dim, padding_idx=0):
-        super().__init__()
-
-        self.word_emb_layer = nn.Embedding(
-            num_embeddings=num_word,
-            embedding_dim=word_emb_dim,
-            padding_idx=padding_idx,
-        )
-
-    def forward(self, word_ids):
-        word_emb = self.word_emb_layer(word_ids)
-        avg_word_emb = torch.mean(word_emb, dim=-2)
-        return avg_word_emb
-
-
-class SkuEmbedding(nn.Module):
-    def __init__(
-        self,
-        num_sku,
-        sku_emb_dim,
-        num_cat,
-        cat_emb_dim,
-        num_price,
-        price_emb_dim,
-        word_emb_dim,
-        word_emb_layer,
-        event_emb_dim,
-        event_emb_layer,
-        item_emb_dim,
-        padding_idx=0,
-    ):
-        super().__init__()
-        self.sku_emb_layer = nn.Embedding(
-            num_embeddings=num_sku,
-            embedding_dim=sku_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.cat_emb_layer = nn.Embedding(
-            num_embeddings=num_cat,
-            embedding_dim=cat_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.price_emb_layer = nn.Embedding(
-            num_embeddings=num_price,
-            embedding_dim=price_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.word_emb_layer = word_emb_layer
-        self.event_emb_layer = event_emb_layer
-
-        self.fc1 = nn.Linear(
-            event_emb_dim + sku_emb_dim + cat_emb_dim + price_emb_dim + word_emb_dim,
-            item_emb_dim,
-        )
-        self.relu = nn.ReLU()
-
-    def forward(self, event_id, sku_id, cat_id, price_id, word_ids):
-        event_emb = self.event_emb_layer(event_id)
-        sku_emb = self.sku_emb_layer(sku_id)
-        cat_emb = self.cat_emb_layer(cat_id)
-        price_emb = self.price_emb_layer(price_id)
-        word_emb = self.word_emb_layer(word_ids)
-        concat_emb = torch.cat([event_emb, sku_emb, cat_emb, price_emb, word_emb], dim=-1)
-        item_emb = self.fc1(concat_emb)
-        item_emb = self.relu(item_emb)
-        return item_emb
-
-class UrlEmbedding(nn.Module):
-    def __init__(
-        self,
-        num_url,
-        url_emb_dim,
-        event_emb_dim,
-        event_emb_layer,
-        item_emb_dim,
-        padding_idx=0,
-    ):
-        super().__init__()
-        self.url_emb_layer = nn.Embedding(
-            num_embeddings=num_url,
-            embedding_dim=url_emb_dim,
-            padding_idx=padding_idx,
-        )
-        self.event_emb_layer = event_emb_layer
-
-        self.fc1 = nn.Linear(
-            event_emb_dim + url_emb_dim,
-            item_emb_dim,
-        )
-        self.relu = nn.ReLU()
-
-    def forward(self, event_id, url_id):
-        event_emb = self.event_emb_layer(event_id)
-        url_emb = self.url_emb_layer(url_id)
-        concat_emb = torch.cat([url_emb, event_emb], dim=-1)
-        item_emb = self.fc1(concat_emb)
-        item_emb = self.relu(item_emb)
-        return item_emb
-
-class QueryEmbedding(nn.Module):
-    def __init__(
-        self,
-        word_emb_dim,
-        word_emb_layer,
-        event_emb_dim,
-        event_emb_layer,
-        item_emb_dim,
-        padding_idx=0,
-    ):
-        super().__init__()
-
-        self.event_emb_layer = event_emb_layer
-        self.word_emb_layer = word_emb_layer
-
-        self.fc1 = nn.Linear(
-            event_emb_dim + word_emb_dim,
-            item_emb_dim,
-        )
-        self.relu = nn.ReLU()
-
-    def forward(self, event_id, word_ids):
-        event_emb = self.event_emb_layer(event_id)
-        word_emb = self.word_emb_layer(word_ids)
-        concat_emb = torch.cat([event_emb, word_emb], dim=-1)
-        item_emb = self.fc1(concat_emb)
-        item_emb = self.relu(item_emb)
-        return item_emb
 
 class EventTransformerTarget(nn.Module):
     def __init__(
         self,
-        hidden_dim: int = 512,
+        input_dim: int = 512,
+        embed_dim: int = 512,
         num_heads: int = 8,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
@@ -187,8 +293,11 @@ class EventTransformerTarget(nn.Module):
         super().__init__()
 
         self.last_embed_dim = last_embed_dim
+
+        self.input_linear = nn.Linear(input_dim, embed_dim, bias=True)
+
         decoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
+            d_model=embed_dim,
             nhead=num_heads,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
@@ -201,7 +310,7 @@ class EventTransformerTarget(nn.Module):
             num_layers=num_decoder_layers,
         )
 
-        self.last_linear = nn.Linear(hidden_dim, last_embed_dim, bias=True)
+        self.last_linear = nn.Linear(embed_dim, last_embed_dim, bias=True)
         self.last_embed_dim = last_embed_dim
 
     def forward(
@@ -211,7 +320,7 @@ class EventTransformerTarget(nn.Module):
     ) -> torch.Tensor:
 
         src_key_padding_mask = attention_mask.to(dtype=torch.bool).logical_not()
-
+        x = self.input_linear(x)
         z = self.transformer_encoder(x, src_key_padding_mask=src_key_padding_mask)
         z = z.masked_fill(src_key_padding_mask.unsqueeze(-1), 0.0)
         # average pooling
@@ -225,15 +334,14 @@ class EventTransformerTarget(nn.Module):
             pooled_output=pooled_trm_z,
             last_hidden_state=z,
             attention_mask=attention_mask,
+            moe_loss=None,
         )
 
 class LightningRecsysModel(L.LightningModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.d_model = cfg.hidden_dim
         self.padding_idx = cfg.padding_idx
-        self.static_features_dim = cfg.static_features_dim
 
         self.event_emb_layer = nn.Embedding(
             num_embeddings=cfg.num_event,
@@ -254,31 +362,21 @@ class LightningRecsysModel(L.LightningModule):
             cat_emb_dim=cfg.cat_emb_dim,
             num_price=cfg.num_price,
             price_emb_dim=cfg.price_emb_dim,
-            word_emb_dim=cfg.word_emb_dim,
+            word_emb_dim=cfg.item_emb_dim,
             word_emb_layer=self.word_emb_layer,
-            event_emb_layer=self.event_emb_layer,
-            event_emb_dim=cfg.event_emb_dim,
-            item_emb_dim=cfg.hidden_dim,
+            item_emb_dim=cfg.item_emb_dim,
             padding_idx=self.padding_idx,
         )
 
-        self.url_emb_layer = UrlEmbedding(
-            num_url=cfg.num_url,
-            url_emb_dim=cfg.url_emb_dim,
-            event_emb_layer=self.event_emb_layer,
-            event_emb_dim=cfg.event_emb_dim,
-            item_emb_dim=cfg.hidden_dim,
+        self.url_emb_layer = nn.Embedding(
+            num_embeddings=cfg.num_url,
+            embedding_dim=cfg.url_emb_dim,
             padding_idx=self.padding_idx,
         )
 
-        self.query_emb_layer = QueryEmbedding(
-            word_emb_dim=cfg.word_emb_dim,
-            word_emb_layer=self.word_emb_layer,
-            event_emb_dim=cfg.event_emb_dim,
-            event_emb_layer=self.event_emb_layer,
-            item_emb_dim=cfg.hidden_dim,
-            padding_idx=self.padding_idx,
-        )
+        input_dim = cfg.event_emb_dim + cfg.item_emb_dim + cfg.url_emb_dim + cfg.word_emb_dim + cfg.day_emb_dim + cfg.week_emb_dim
+        self.input_linear = nn.Linear(input_dim, cfg.hidden_dim, bias=True)
+        self.static_features_dim = cfg.static_features_dim
 
         self.model = OneTransModel(
             num_layers=cfg.num_layers,
@@ -287,20 +385,32 @@ class LightningRecsysModel(L.LightningModule):
             num_heads=cfg.num_heads,
             ns_len=cfg.ns_len,
             seq_len=cfg.max_len,
-            ns_input_dim=cfg.static_features_dim,
+            ns_input_dim=cfg.total_ns_dim,
             last_embed_dim=cfg.last_embed_dim,
             mlp_hidden_units=cfg.mlp_hidden_units,
             dropout=cfg.dropout
         )
 
         self.model_target = EventTransformerTarget(
-            hidden_dim=cfg.hidden_dim,
+            input_dim=cfg.event_emb_dim + cfg.item_emb_dim + cfg.url_emb_dim + cfg.word_emb_dim,
+            embed_dim=cfg.embed_dim,
             num_heads=cfg.num_heads,
             dim_feedforward=cfg.dim_feedforward,
             dropout=cfg.dropout,
             activation=cfg.activation,
             num_decoder_layers=cfg.num_decoder_layers,
             last_embed_dim=cfg.last_embed_dim,
+        )
+
+        self.day_emb_layer = nn.Embedding(
+            num_embeddings=cfg.num_day,
+            embedding_dim=cfg.day_emb_dim,
+            padding_idx=self.padding_idx,
+        )
+        self.week_emb_layer = nn.Embedding(
+            num_embeddings=cfg.num_week,
+            embedding_dim=cfg.week_emb_dim,
+            padding_idx=self.padding_idx,
         )
 
         self.lr = cfg.learning_rate
@@ -311,13 +421,12 @@ class LightningRecsysModel(L.LightningModule):
         self.train_acc = torchmetrics.Accuracy(task="multiclass", num_classes=cfg.batch_size)
 
         # auxiliary task for embedding model
-        self.empty_head = nn.Linear(self.d_model, 1, bias=True)
-        self.train_emptry_auc = torchmetrics.AUROC(task="binary")
+        self.empty_head = nn.Linear(cfg.last_embed_dim, 1, bias=True)
 
         # linear probe to evaluate embedding
-        self.churn_head = nn.Linear(self.d_model, 1)
-        self.buy_category_head = nn.Linear(self.d_model, cfg.num_buy_categories)
-        self.buy_sku_head = nn.Linear(self.d_model, cfg.num_buy_skus)
+        self.churn_head = nn.Linear(cfg.last_embed_dim, 1)
+        self.buy_category_head = nn.Linear(cfg.last_embed_dim, cfg.num_buy_categories)
+        self.buy_sku_head = nn.Linear(cfg.last_embed_dim, cfg.num_buy_skus)
 
         self.valid_empty_auc = torchmetrics.AUROC(task="binary")
         self.valid_churn_auc = torchmetrics.AUROC(task="binary")
@@ -332,50 +441,6 @@ class LightningRecsysModel(L.LightningModule):
             average="macro",
         )
 
-    def _aggregate_embeddings(
-        self,
-        event_type,
-        sku_id,
-        url_id,
-        query_id,
-        cat_id,
-        price_id,
-        name_id,
-    ):
-        B, S = event_type.shape
-
-        agg_embeddings = torch.zeros(
-            (B, S, self.cfg.hidden_dim),
-            device=event_type.device
-        )
-
-        sku_pos_idx = (
-            (event_type == EventType.ADD_TO_CART.value)
-            | (event_type == EventType.PRODUCT_BUY.value)
-            | (event_type == EventType.REMOVE_FROM_CART.value)
-        )
-
-        event_id = event_type[sku_pos_idx]
-        sku_id = sku_id[sku_pos_idx]
-        cat_id = cat_id[sku_pos_idx]
-        price_id = price_id[sku_pos_idx]
-        sku_word_id = name_id[sku_pos_idx]
-        x = self.sku_emb_layer(event_id, sku_id, cat_id, price_id, sku_word_id)
-
-        agg_embeddings[sku_pos_idx, :] = x
-
-        url_pos_idx = event_type == EventType.PAGE_VISIT.value
-        url_id = url_id[url_pos_idx]
-        event_id = event_type[url_pos_idx]
-        agg_embeddings[url_pos_idx, :] = self.url_emb_layer(event_id, url_id)
-
-        query_pos_idx = event_type == EventType.SEARCH_QUERY.value
-        query_word_id = query_id[query_pos_idx]
-        event_id = event_type[query_pos_idx]
-        agg_embeddings[query_pos_idx, :] = self.query_emb_layer(event_id, query_word_id)
-
-        return agg_embeddings
-
     def compute_user_embedding(
         self,
         event_type,
@@ -385,19 +450,45 @@ class LightningRecsysModel(L.LightningModule):
         cat_id,
         price_id,
         name_id,
-        # timestamp,
-        statistical_features,
+        feature_list=None,
+        diff_days=None,
+        diff_weeks=None,
+        is_target=False,
     ):
-        s_seq = self._aggregate_embeddings(event_type, sku_id, url_id, query_id, cat_id, price_id, name_id)
+
+        event_emb = self.event_emb_layer(event_type)
+        sku_emb = self.sku_emb_layer(sku_id, cat_id, price_id, name_id)
+        url_emb = self.url_emb_layer(url_id)
+        query_emb = self.word_emb_layer(query_id)
+
+        if is_target:
+            seq_emb = torch.concat([event_emb, sku_emb, url_emb, query_emb], dim=-1, )
+            return seq_emb
+        else:
+            day_seq_emb = self.day_emb_layer(diff_days)
+            week_seq_emb = self.week_emb_layer(diff_weeks)
+
+            seq_emb = torch.concat(
+                [event_emb, sku_emb, url_emb, query_emb, day_seq_emb, week_seq_emb],
+                dim=-1,
+            )
+        seq_emb = self.input_linear(seq_emb)
         s_padding_mask = (event_type != 0).float()
 
-        outputs1 = self.model(s_seq, statistical_features[:, -self.static_features_dim:], s_padding_mask)
+        statistical_features = torch.cat(feature_list, dim=-1)
+        outputs1: EventTransformerBoneOutputs = self.model(seq_emb, statistical_features, s_padding_mask)
 
         return outputs1
 
     def training_step(self, batch, batch_idx):
         input_features, target_features, labels = batch
         labels_empty = labels.pop("empty")
+
+        group_lifecycle = input_features["group_lifecycle"]
+        group_recency = input_features["group_recency"]
+        group_purchase = input_features["group_purchase"]
+        group_cart_intent = input_features["group_cart_intent"]
+        group_exploration = input_features["group_exploration"]
 
         outputs1 = self.compute_user_embedding(
             input_features['event_id'],
@@ -407,10 +498,11 @@ class LightningRecsysModel(L.LightningModule):
             input_features['category'],
             input_features['price'],
             input_features['name_id'],
-            statistical_features=input_features['statistical_features'],
+            [group_lifecycle, group_recency, group_purchase, group_cart_intent, group_exploration],
+            diff_days=input_features['diff_days'],
+            diff_weeks=input_features['diff_weeks'],
         )
-
-        targets_seq = self._aggregate_embeddings(
+        targets_seq = self.compute_user_embedding(
             target_features['event_id'],
             target_features['sku'],
             target_features['url'],
@@ -418,6 +510,7 @@ class LightningRecsysModel(L.LightningModule):
             target_features['category'],
             target_features['price'],
             target_features['name_id'],
+            is_target=True
         )
         attention_mask = (target_features['event_id'] != 0).float()
         attention_mask[:, -1] = 1
@@ -433,6 +526,10 @@ class LightningRecsysModel(L.LightningModule):
         # mask for empty
         _loss = F.cross_entropy(sim / self.temperature, sim_labels, reduction="none")
         loss = _loss.mean()
+
+        total_loss = loss
+        if hasattr(outputs1, 'moe_loss') and outputs1.moe_loss is not None:
+            total_loss = total_loss + outputs1.moe_loss
 
         self.log("train/loss", loss.detach().item(), prog_bar=True, logger=True, on_step=True)
         # boolean_indices = labels_empty.to(dtype=torch.bool).logical_not()
@@ -460,8 +557,8 @@ class LightningRecsysModel(L.LightningModule):
 
         # auxiliary task: emptry prediction
         logits_empty = self.empty_head(outputs1).squeeze(dim=1)
-        loss += _get_bce_loss(logits_empty, labels_empty)
-        self.train_emptry_auc.update(logits_empty.detach(), labels_empty.to(dtype=torch.uint8))
+        total_loss += _get_bce_loss(logits_empty, labels_empty)
+        self.train_empty_auc.update(logits_empty.detach(), labels_empty.to(dtype=torch.uint8))
 
         # linear probe
         # detach to prevent gradient flow to embedding model
@@ -469,16 +566,23 @@ class LightningRecsysModel(L.LightningModule):
         logits_churn = self.churn_head(emb_detached).squeeze(dim=1)
         logits_buy_category = self.buy_category_head(emb_detached)
         logits_buy_sku = self.buy_sku_head(emb_detached)
-        loss += _get_bce_loss(logits_churn, labels["churn"])
-        loss += _get_bce_loss(logits_buy_category, labels["buy_category"])
-        loss += _get_bce_loss(logits_buy_sku, labels["buy_sku"])
+        total_loss += _get_bce_loss(logits_churn, labels["churn"])
+        total_loss += _get_bce_loss(logits_buy_category, labels["buy_category"])
+        total_loss += _get_bce_loss(logits_buy_sku, labels["buy_sku"])
 
-        return loss
+        return total_loss
 
 
     def validation_step(self, batch, batch_idx):
         input_features, target_features, labels = batch
         labels_empty = labels.pop("empty")  # (B,)
+
+        # 1. Student / User Embedding
+        group_lifecycle = input_features["group_lifecycle"]
+        group_recency = input_features["group_recency"]
+        group_purchase = input_features["group_purchase"]
+        group_cart_intent = input_features["group_cart_intent"]
+        group_exploration = input_features["group_exploration"]
 
         outputs1 = self.compute_user_embedding(
             input_features['event_id'],
@@ -488,10 +592,12 @@ class LightningRecsysModel(L.LightningModule):
             input_features['category'],
             input_features['price'],
             input_features['name_id'],
-            statistical_features=input_features['statistical_features'],
+            [group_lifecycle, group_recency, group_purchase, group_cart_intent, group_exploration],
+            diff_days=input_features['diff_days'],
+            diff_weeks=input_features['diff_weeks'],
         )
 
-        targets_seq = self._aggregate_embeddings(
+        targets_seq = self.compute_user_embedding(
             target_features['event_id'],
             target_features['sku'],
             target_features['url'],
@@ -499,6 +605,7 @@ class LightningRecsysModel(L.LightningModule):
             target_features['category'],
             target_features['price'],
             target_features['name_id'],
+            is_target=True
         )
         attention_mask = (target_features['event_id'] != 0).float()
         attention_mask[:, -1] = 1
@@ -529,7 +636,7 @@ class LightningRecsysModel(L.LightningModule):
         self.valid_empty_auc.update(logits_empty, labels_empty.to(dtype=torch.uint8))
 
         # 5. Linear Probes (Downstream Tasks)
-        emb_detached = outputs1
+        emb_detached = outputs1  # Validation 不需要 detach 用于梯度阻断，但保持一致性无妨
         logits_churn = self.churn_head(emb_detached).squeeze(dim=1)
         logits_buy_category = self.buy_category_head(emb_detached)
         logits_buy_sku = self.buy_sku_head(emb_detached)
@@ -540,7 +647,6 @@ class LightningRecsysModel(L.LightningModule):
 
         loss += loss_churn + loss_buy_cat + loss_buy_sku
 
-        # 6. Logging & Metrics Update
         self.log("valid/loss", loss, prog_bar=True, logger=True, on_step=False, on_epoch=True)
         self.log("valid/loss_churn", loss_churn, logger=True, on_step=False, on_epoch=True)
         self.log("valid/loss_cat", loss_buy_cat, logger=True, on_step=False, on_epoch=True)
@@ -554,7 +660,6 @@ class LightningRecsysModel(L.LightningModule):
             logits_churn,
             labels["churn"].to(dtype=torch.uint8)
         )
-
         is_contain_buy_sku = (torch.sum(labels["buy_sku"], dim=1) > 0).long()
         if torch.sum(is_contain_buy_sku) > 0:
             mask = is_contain_buy_sku == 1
@@ -644,24 +749,28 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=128,
+        default=32,
         help="Batch size for training",
     )
-
     parser.add_argument(
         "--num-layers",
         type=int,
         default=8,
     )
     parser.add_argument(
-        "--ns-len",
-        type=int,
-        default=5,
-    )
-    parser.add_argument(
         "--max-len",
         type=int,
         default=64,
+    )
+    parser.add_argument(
+        "--ns-len",
+        type=int,
+        default=2,
+    )
+    parser.add_argument(
+        "--num-heads",
+        type=int,
+        default=4,
     )
     parser.add_argument(
         "--hidden-dim",
@@ -687,12 +796,11 @@ def main():
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
         accelerator=args.accelerator,
-        ns_len=args.ns_len,
-        max_len=args.max_len,
-        num_layers=args.num_layers,
         device=device,
         num_workers=args.num_workers,
         devices=[int(args.devices)] if args.accelerator == "cuda" else [],
+        ns_len=args.ns_len,
+        num_heads=args.num_heads,
     )
 
     train_dataset_dir = os.path.join(args.data_dir, "train")

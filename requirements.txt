@@ -11,3 +11,4 @@ addict
 ftfy
 timm
 schedulefree
+fuxictr

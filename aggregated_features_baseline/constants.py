@@ -21,3 +21,4 @@ EVENT_TYPE_TO_COLUMNS: Dict[EventTypes, List[str]] = {
 
 QUERY_COLUMN = "query"
 EMBEDDINGS_DTYPE = np.float64
+

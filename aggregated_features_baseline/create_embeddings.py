@@ -103,7 +103,24 @@ def create_embeddings(
     logger.info("Merging features with recency, frequency, and product name embeddings...")
     client_ids, base_embeddings = aggregator.merge_features(all_events=all_events)
 
-    emb = np.array(base_embeddings, dtype=np.float64)
+    final_embeddings = []
+    for idx, client_id in enumerate(tqdm(client_ids, desc="Merging final embeddings")):
+        if client_id in product_name_vectors_by_client:
+            vectors = np.stack(product_name_vectors_by_client[client_id], axis=0)
+            scaled_vector = vectors.mean(axis=0)
+        else:
+            dim = next(iter(product_name_embeddings.values())).shape[0]
+            scaled_vector = np.zeros(dim, dtype=np.float64)
+
+        # 拼接到 embedding
+        combined = np.concatenate([
+            base_embeddings[idx].astype(np.float64),
+            scaled_vector,
+        ])
+        final_embeddings.append(combined)
+    emb = np.array(final_embeddings, dtype=np.float64)
+
+    # emb = np.array(base_embeddings, dtype=np.float64)
 
     core_emb = emb
 

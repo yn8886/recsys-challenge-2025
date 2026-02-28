@@ -11,7 +11,7 @@ import json
 
 DATASET_DIR = "../dataset/ubc_data_tiny"
 
-SAVE_DIR = "../dataset/cl"
+SAVE_DIR = "../dataset/mtl"
 MAPPING_DIR = os.path.join(SAVE_DIR, "mappings")
 TRAIN_DIR = os.path.join(DATASET_DIR, "train")
 VALID_DIR = os.path.join(DATASET_DIR, "valid")
@@ -271,16 +271,7 @@ def save_dataframe(df, save_dir):
         save_path = os.path.join(save_dir, file_name)
         np.save(save_path, array)
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--dataset_type",
-        type=str,
-        default="valid",
-        choices=["train", "valid"],
-    )
-
-    args = parser.parse_args()
+def main(args):
     dataset_type = args.dataset_type
     INPUT_DIR = DATASET_DIR
 
@@ -448,24 +439,24 @@ def main():
         pl.col("query")
         .str.extract_all(r"\d+")  # 文字列中の数値をすべて抽出 (結果は List[String] 型)
         .list.eval(pl.element().cast(pl.Int64), parallel=True)
-        .alias("word_ids")
+        .alias("query_ids")
     )
 
     # Adding 2 to word_ids for PAD_IDX and MASK
     query_id_offset = 1
     search_query_df = search_query_df.with_columns(
-        pl.col("word_ids").list.eval(pl.element() + query_id_offset)
+        pl.col("query_ids").list.eval(pl.element() + query_id_offset)
     )
 
     product_prop_df = product_prop_df.with_columns(
         pl.col("name")
         .str.extract_all(r"\d+")
         .list.eval(pl.element().cast(pl.Int64), parallel=True)
-        .alias("word_ids")
+        .alias("name_ids")
     )
     # Adding 2 to word_ids for PAD_IDX and MASK
     product_prop_df = product_prop_df.with_columns(
-        pl.col("word_ids").list.eval(pl.element() + query_id_offset)
+        pl.col("name_ids").list.eval(pl.element() + query_id_offset)
     )
 
     target_cols = [
@@ -474,20 +465,23 @@ def main():
         "timestamp",
         "sku_id",
         "url_id",
-        "word_ids",
+        "query_ids",
         "category_id",
         "price_id",
+        "name_ids",
     ]
     add_to_cart_df = add_to_cart_df.join(product_prop_df, on="sku_id", how="left")
     add_to_cart_df = add_to_cart_df.with_columns(
         pl.lit(EventType.ADD_TO_CART.value).alias("event_type"),
         pl.lit(0).alias("url_id").cast(pl.Int64),
+        pl.lit([0] * 16).alias("query_ids"),
     ).select(target_cols)
 
     product_buy_df = product_buy_df.join(product_prop_df, on="sku_id", how="left")
     product_buy_df = product_buy_df.with_columns(
         pl.lit(EventType.PRODUCT_BUY.value).alias("event_type"),
         pl.lit(0).alias("url_id").cast(pl.Int64),
+        pl.lit([0] * 16).alias("query_ids"),
     ).select(target_cols)
 
     remove_from_cart_df = remove_from_cart_df.join(
@@ -496,14 +490,16 @@ def main():
     remove_from_cart_df = remove_from_cart_df.with_columns(
         pl.lit(EventType.REMOVE_FROM_CART.value).alias("event_type"),
         pl.lit(0).alias("url_id").cast(pl.Int64),
+        pl.lit([0] * 16).alias("query_ids"),
     ).select(target_cols)
 
     page_visit_df = page_visit_df.with_columns(
         pl.lit(EventType.PAGE_VISIT.value).alias("event_type"),
         pl.lit(0).alias("sku_id").cast(pl.Int64),
-        pl.lit([0] * 16).alias("word_ids"),
+        pl.lit([0] * 16).alias("query_ids"),
         pl.lit(0).alias("category_id").cast(pl.Int64),
         pl.lit(0).alias("price_id").cast(pl.Int64),
+        pl.lit([0] * 16).alias("name_ids"),
     ).select(target_cols)
 
     search_query_df = search_query_df.with_columns(
@@ -512,6 +508,7 @@ def main():
         pl.lit(0).alias("url_id").cast(pl.Int64),
         pl.lit(0).alias("category_id").cast(pl.Int64),
         pl.lit(0).alias("price_id").cast(pl.Int64),
+        pl.lit([0] * 16).alias("name_ids"),
     ).select(target_cols)
 
     print(max(add_to_cart_df['timestamp']))
@@ -536,76 +533,60 @@ def main():
         "timestamp",
         "sku_id",
         "url_id",
-        "word_ids",
+        "query_ids",
         "category_id",
         "price_id",
+        "name_ids",
     ]
     event_df = event_df.select(target_cols)
 
     input_df = event_df.filter(pl.col("timestamp") < LAST_TIMESTAMP)
-    TIMESTAMP_DIVIDER = 60 * 60 * 24
+    OFFSET = 1  # Offset for PAD_IDX and MASK
     input_df = input_df.with_columns(
-        (pl.lit(LAST_TIMESTAMP.timestamp()) - pl.col("timestamp").dt.epoch(time_unit="s"))
-        .truediv(TIMESTAMP_DIVIDER)
-        .cast(pl.Float32)
-        .alias("time_diff")
+        (LAST_TIMESTAMP - pl.col("timestamp")).dt.total_days().alias("diff_days")
+        + OFFSET,
+        (LAST_TIMESTAMP - pl.col("timestamp")).dt.total_days().alias("diff_weeks") // 7
+        + OFFSET,
     )
     input_df = input_df.group_by("client_id").agg(
         [
-            pl.col("time_diff").sort(descending=True).alias("timestamp"),
-            pl.col("event_type").sort_by("time_diff", descending=True),
-            pl.col("sku_id").sort_by("time_diff", descending=True),
-            pl.col("url_id").sort_by("time_diff", descending=True),
-            pl.col("word_ids").sort_by("time_diff", descending=True),
-            pl.col("category_id").sort_by("time_diff", descending=True),
-            pl.col("price_id").sort_by("time_diff", descending=True),
+            pl.col("timestamp").sort(),
+            pl.col("event_type").sort_by("timestamp"),
+            pl.col("sku_id").sort_by("timestamp"),
+            pl.col("url_id").sort_by("timestamp"),
+            pl.col("query_ids").sort_by("timestamp"),
+            pl.col("category_id").sort_by("timestamp"),
+            pl.col("price_id").sort_by("timestamp"),
+            pl.col("name_ids").sort_by("timestamp"),
+            pl.col("diff_days").sort_by("timestamp"),
+            pl.col("diff_weeks").sort_by("timestamp"),
         ]
     )
 
+    # 4. Create target data
+    if dataset_type == 'train':
+        product_buy_target_df = pl.read_parquet(os.path.join(TARGET_DIR, "train_target.parquet"))
+    else:
+        product_buy_target_df = pl.read_parquet(os.path.join(TARGET_DIR, "validation_target.parquet"))
 
-    candidate_sku = np.load(os.path.join(TARGET_DIR, "propensity_sku.npy"))
-    candidate_cat = np.load(os.path.join(TARGET_DIR, "propensity_category.npy"))
-
-    cols_to_rename = [col for col in target_cols if col not in ["client_id", "timestamp"]]
-    target_df = (
-        event_df
-        .filter(pl.col("timestamp") >= LAST_TIMESTAMP)
-        .sort("timestamp")
-        .rename({col: f"target_{col}" for col in cols_to_rename})
+    target_df = product_buy_target_df.group_by("client_id").agg(
+        pl.col("sku").alias("buy_sku"),
+        pl.col("category").alias("buy_cat"),
     )
 
-    target_grouped = target_df.group_by("client_id").agg(
-        [
-            pl.col("target_event_type"),
-            pl.col("target_sku_id"),
-            pl.col("target_price_id"),
-            pl.col("target_url_id"),
-            pl.col("target_word_ids"),
-            pl.col("target_category_id"),
-        ]
-    )
+    sku_candidates = np.load(os.path.join(TARGET_DIR, "propensity_sku.npy"))
+    cat_candidates = np.load(os.path.join(TARGET_DIR, "propensity_category.npy"))
 
-    all_df = input_df.join(target_grouped, on="client_id", how="left")
-
-    product_buy_df = pl.read_parquet(os.path.join(INPUT_DIR, "product_buy.parquet"))
-    product_buy_df = product_buy_df.join(product_prop_df, on="sku", how="left")
-    target_buys = product_buy_df.filter(pl.col("timestamp") >= TRAIN_TARGET_START)
-    target_buys_sku = target_buys.filter(pl.col("sku").is_in(candidate_sku))
-    target_buys_cat = target_buys.filter(pl.col("category").is_in(candidate_cat))
-
-    sku_candidates = target_buys_sku.select("sku_id").unique().sort("sku_id").get_column("sku_id").to_numpy()
-    cat_candidates = target_buys_cat.select("category_id").unique().sort("category_id").get_column("category_id").to_numpy()
-    print(f'len_sku_candidates: {len(sku_candidates)}')
-    print(f'len_cat_candidates: {len(cat_candidates)}')
     client_ids = []
     buy_sku_labels = []
     buy_cat_labels = []
+    churn_labels = []
 
-    for i in tqdm(range(len(target_grouped))):
-        client_id = target_grouped["client_id"][i]
+    for i in tqdm(range(len(target_df))):
+        client_id = target_df["client_id"][i]
 
-        buy_sku = target_grouped["target_sku_id"][i].to_numpy()
-        buy_cat = target_grouped["target_category_id"][i].to_numpy()
+        buy_sku = target_df["buy_sku"][i].to_numpy()
+        buy_cat = target_df["buy_cat"][i].to_numpy()
 
         buy_sku_label = np.isin(sku_candidates, buy_sku).astype(np.int32)
         buy_cat_label = np.isin(cat_candidates, buy_cat).astype(np.int32)
@@ -614,49 +595,46 @@ def main():
         buy_sku_labels.append(buy_sku_label)
         buy_cat_labels.append(buy_cat_label)
 
+        churn_labels.append(0)
+
     data = {
         "client_id": client_ids,
-        "labels_buy_sku": buy_sku_labels,
-        "labels_buy_category": buy_cat_labels,
+        "label_buy_sku": buy_sku_labels,
+        "label_buy_cat": buy_cat_labels,
+        "churn": churn_labels,
     }
 
     schema = {
         "client_id": pl.Int64,
-        "labels_buy_sku": pl.List(pl.Int32),
-        "labels_buy_category": pl.List(pl.Int32),
+        "label_buy_sku": pl.List(pl.Int32),
+        "label_buy_cat": pl.List(pl.Int32),
+        "churn": pl.Int8,
     }
 
     label_df = pl.from_dicts(data=data, schema=schema)
-    all_df = all_df.join(label_df, on="client_id", how="left")
+
+    all_df = input_df.join(label_df, on="client_id", how="left")
 
     all_df = all_df.with_columns(
-        pl.col("labels_buy_sku").fill_null(pl.lit([0] * len(sku_candidates))),
-        pl.col("labels_buy_category").fill_null(pl.lit([0] * len(cat_candidates))),
+        pl.col("label_buy_sku").fill_null(pl.lit([0] * 100)),
+        pl.col("label_buy_cat").fill_null(pl.lit([0] * 100)),
+        pl.col("churn").fill_null(1)
     )
-
-
-    all_df = all_df.with_columns([
-        pl.col("target_event_type").is_null().cast(pl.Int8).alias("empty"),
-        pl.when(pl.col("target_event_type").is_null())
-        .then(pl.lit(1))
-        .otherwise(
-            pl.col("target_event_type").list.contains(1).not_().cast(pl.Int8)
-        )
-        .alias("churn")
-    ])
-
-    all_df = all_df.with_columns(
-        pl.col("target_event_type").fill_null(pl.lit([0])),
-        pl.col("target_sku_id").fill_null(pl.lit([0])),
-        pl.col("target_price_id").fill_null(pl.lit([0])),
-        pl.col("target_url_id").fill_null(pl.lit([0])),
-        pl.col("target_word_ids").fill_null(pl.lit([[0] * 16])),
-        pl.col("target_category_id").fill_null(pl.lit([0])),
-    )
-
-    save_dir = os.path.join(SAVE_DIR, dataset_type)
     all_df = all_df.join(stats_df, on="client_id", how="left")
+    all_df = all_df.sort(by="client_id")
+    save_dir = os.path.join(SAVE_DIR, dataset_type)
     save_dataframe(all_df, save_dir)
 
 if __name__ == "__main__":
-    main()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="valid",
+        choices=["train", "valid"],
+    )
+
+    args = parser.parse_args()
+
+    main(args=args)

@@ -73,16 +73,16 @@ class FeaturesAggregator:
         )
 
     def get_calculator(self, event_type: EventTypes, df: pd.DataFrame, columns: List[str]) -> Calculator:
-        # if event_type is EventTypes.SEARCH_QUERY:
-        #     if df.empty:
-        #         dummy_vector = "[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]"
-        #         return QueryFeaturesCalculator(query_column=QUERY_COLUMN, single_query=dummy_vector)
-        #     return QueryFeaturesCalculator(
-        #         query_column=QUERY_COLUMN, single_query=df.iloc[0][QUERY_COLUMN]
-        #     )
-        # else:
-        max_date = df["timestamp"].max()
-        unique_values = get_top_values(df, columns, self.top_n)
+        if event_type is EventTypes.SEARCH_QUERY:
+            if df.empty:
+                dummy_vector = "[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]"
+                return QueryFeaturesCalculator(query_column=QUERY_COLUMN, single_query=dummy_vector)
+            return QueryFeaturesCalculator(
+                query_column=QUERY_COLUMN, single_query=df.iloc[0][QUERY_COLUMN]
+            )
+        else:
+            max_date = df["timestamp"].max()
+            unique_values = get_top_values(df, columns, self.top_n)
         return StatsFeaturesCalculator(
             num_days=self.num_days,
             max_date=max_date,

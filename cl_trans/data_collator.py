@@ -61,12 +61,34 @@ class RecsysDatasetV12(Dataset):
         # )
 
         print("Loading static_features.npy")
-        self.statistical_features = np.load(
-            os.path.join(self.dataset_dir, "stats_features.npy"), allow_pickle=True
+        self.group_lifecycle = np.load(
+            os.path.join(self.dataset_dir, "group_lifecycle.npy"), allow_pickle=True
         )
+        self.group_recency = np.load(
+            os.path.join(self.dataset_dir, "group_recency.npy"), allow_pickle=True
+        )
+        self.group_purchase = np.load(
+            os.path.join(self.dataset_dir, "group_purchase.npy"), allow_pickle=True
+        )
+        self.group_cart_intent = np.load(
+            os.path.join(self.dataset_dir, "group_cart_intent.npy"), allow_pickle=True
+        )
+        self.group_exploration = np.load(
+            os.path.join(self.dataset_dir, "group_exploration.npy"), allow_pickle=True
+        )
+        # self.statistical_features = np.load(
+        #     os.path.join(self.dataset_dir, "stats_features.npy"), allow_pickle=True
+        # )
         # print(self.statistical_features.shape)
         # print(f"Min: {self.statistical_features.min()}")
         # print(f"Max: {self.statistical_features.max()}")
+
+        self.diff_days = np.load(
+            os.path.join(self.dataset_dir, "diff_days.npy"), allow_pickle=True
+        )
+        self.diff_weeks = np.load(
+            os.path.join(self.dataset_dir, "diff_weeks.npy"), allow_pickle=True
+        )
 
 
         print("Loading labels")
@@ -122,7 +144,15 @@ class RecsysDatasetV12(Dataset):
         features1["name_id"] = torch.tensor(np.stack([np.array(w, dtype=np.int32) for w in self.name_ids[idx]]),
                                             dtype=torch.long)
         # features1["timestamp"] = torch.tensor(self.timestamps[idx], dtype=torch.float32)
-        features1["statistical_features"] = torch.tensor(self.statistical_features[idx], dtype=torch.float32)
+        # features1["statistical_features"] = torch.tensor(self.statistical_features[idx], dtype=torch.float32)
+        features1["diff_days"] = torch.tensor(self.diff_days[idx], dtype=torch.long)
+        features1["diff_weeks"] = torch.tensor(self.diff_weeks[idx], dtype=torch.long)
+        features1["group_lifecycle"] = torch.tensor(self.group_lifecycle[idx], dtype=torch.float)
+        features1["group_recency"] = torch.tensor(self.group_recency[idx], dtype=torch.float)
+        features1["group_purchase"] = torch.tensor(self.group_purchase[idx], dtype=torch.float)
+        features1["group_cart_intent"] = torch.tensor(self.group_cart_intent[idx], dtype=torch.float)
+        features1["group_exploration"] = torch.tensor(self.group_exploration[idx], dtype=torch.float)
+
 
         features2: dict[str, torch.Tensor] = {}
         features2["event_id"] = torch.tensor(self.target_event_types[idx], dtype=torch.long)
@@ -247,14 +277,16 @@ class EventDataCollatorContrastive(EventDataCollator):
         for key in feature_keys:
             sequences = [feature[key] for feature in features]
 
-            sample_tensor = sequences[0]
-            if sample_tensor.ndim == 1:
-                padded_sequences = self._pad_1d_sequences(sequences, max_length, target)
-            elif sample_tensor.ndim == 2:
-                padded_sequences = self._pad_2d_sequences(sequences, max_length, target)
+            if key not in ['group_lifecycle', 'group_recency', 'group_purchase', 'group_cart_intent', 'group_exploration']:
+                sample_tensor = sequences[0]
+                if sample_tensor.ndim == 1:
+                    padded_sequences = self._pad_1d_sequences(sequences, max_length, target)
+                elif sample_tensor.ndim == 2:
+                    padded_sequences = self._pad_2d_sequences(sequences, max_length, target)
+                else:
+                    raise ValueError(f"ndim={sample_tensor.ndim} is not supported.")
             else:
-                raise ValueError(f"ndim={sample_tensor.ndim} is not supported.")
-
+                padded_sequences = self._pad_1d_sequences(sequences, len(sequences[0]), target)
             features_dict[key] = padded_sequences
 
         return features_dict
