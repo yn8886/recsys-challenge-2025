@@ -26,6 +26,7 @@ class ParameterFreeTokenMixer(nn.Module):
         h_count = self.num_heads
         d_head = self.d_head
 
+        print(x.shape)
         split = x.view(batch_size, t_count, h_count, d_head)
         shuffled = split.transpose(1, 2).contiguous()
         mixed = shuffled.view(batch_size, t_count, self.d_model)

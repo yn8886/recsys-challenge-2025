@@ -10,12 +10,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Config:
     # 模型架构参数
+    num_buy_categories: int = 16
+    num_buy_skus: int = 3
     ns_len: int = 1
     num_layers: int = 2
     hidden_dim: int = 512
     max_len: int = 64
-    num_heads: int = 4
     pooling_strategy: str = "max"
+    final_l_s: int = 20
 
     # 特征维度
     num_event = 5 + 1
@@ -26,8 +28,6 @@ class Config:
     num_word = 256 + 1
     num_day = 365
     num_week = 52
-    num_buy_categories = 16
-    num_buy_skus = 3
     static_features_dim = 46
     item_emb_dim = 384
     url_emb_dim = 128
@@ -48,7 +48,7 @@ class Config:
     dim_feedforward = 1024
     num_encoder_layers = 2
     num_decoder_layers = 1
-    last_embed_dim = 256
+    last_embed_dim = 512
     dcn_cross_layers = 3
     dcn_hidden_units = [1024, 512]
     mlp_hidden_units = [512]

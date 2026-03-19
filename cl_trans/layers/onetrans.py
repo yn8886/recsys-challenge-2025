@@ -182,10 +182,13 @@ class OneTransModel(nn.Module):
     def forward(self, s_tokens, raw_ns_features, padding_mask):
         B, L_s, d_model = s_tokens.shape
 
+        # 1. Tokenize NS Features via Auto-Split [cite: 210]
         ns_tokens = self.auto_split_mlp(raw_ns_features).view(B, self.L_ns, d_model)
 
+        # 2. Create Unified Token Sequence [cite: 159, 160]
         x = torch.cat([s_tokens, ns_tokens], dim=1)
 
+        # 3. Pass through Pyramid Stack [cite: 170]
         current_L_s = L_s
         for idx, layer in enumerate(self.layers):
             target_L_s = self.pyramid_schedule[idx]
@@ -193,10 +196,12 @@ class OneTransModel(nn.Module):
             padding_mask = padding_mask[:,-target_L_s:]
             current_L_s = target_L_s
 
+        # 4. Extract final distilled NS-tokens for prediction [cite: 170, 171]
+        # final_ns_tokens = x[:, current_L_s:, :]
         if current_L_s == 0:
             final_ns_tokens = x
         else:
-            final_ns_tokens = torch.concat([x[:, :current_L_s, :].mean(dim=1).unsqueeze(1), x[:, current_L_s:, :]],dim=1)
+            final_ns_tokens = torch.concat([x[:, :current_L_s, :].mean(dim=1).unsqueeze(1), x[:, current_L_s:, :]], dim=1)
         out = self.final_mlp(final_ns_tokens.flatten(start_dim=1))
 
         return out

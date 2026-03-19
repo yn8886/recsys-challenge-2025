@@ -608,29 +608,18 @@ class LightningRecsysModel(L.LightningModule):
         self.log("valid/loss_cat", loss_buy_cat, logger=True, on_step=False, on_epoch=True)
         self.log("valid/loss_sku", loss_buy_sku, logger=True, on_step=False, on_epoch=True)
 
-        # boolean_indices = labels_empty.to(dtype=torch.bool).logical_not()
-        # if boolean_indices.any():
-        #     self.valid_acc.update(sim[boolean_indices].detach().cpu(), sim_labels[boolean_indices].cpu())
-
         self.valid_churn_auc.update(
             logits_churn,
-            labels["churn"].to(dtype=torch.uint8)
+            labels["churn"].to(dtype=torch.uint8),
         )
-        is_contain_buy_sku = (torch.sum(labels["buy_sku"], dim=1) > 0).long()
-        if torch.sum(is_contain_buy_sku) > 0:
-            mask = is_contain_buy_sku == 1
-            self.valid_buy_sku_auc.update(
-                logits_buy_sku[mask], labels["buy_sku"][mask].int()
-            )
-
-        is_contain_buy_cat = (torch.sum(labels["buy_category"], dim=1) > 0).long()
-        if torch.sum(is_contain_buy_cat) > 0:
-            mask = is_contain_buy_cat == 1
-            self.valid_buy_category_auc.update(
-                logits_buy_category[mask], labels["buy_category"][mask].int()
-            )
-
-        return loss
+        self.valid_buy_category_auc.update(
+            logits_buy_category,
+            labels["buy_category"].int(),
+        )
+        self.valid_buy_sku_auc.update(
+            logits_buy_sku,
+            labels["buy_sku"].int()
+        )
 
 
     def on_validation_epoch_end(self):
@@ -745,6 +734,16 @@ def main():
         default=False,
     )
     parser.add_argument(
+        "--num-buy-categories",
+        type=int,
+        default=16,
+    )
+    parser.add_argument(
+        "--num-buy-skus",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
         "--use-moe",
         type=bool,
         default=False,
@@ -769,8 +768,9 @@ def main():
         use_moe=args.use_moe,
         use_semantic=args.use_semantic,
         hidden_dim=args.hidden_dim,
-        num_heads=args.num_heads,
         pooling_strategy=args.pooling_strategy,
+        num_buy_categories=args.num_buy_categories,
+        num_buy_skus=args.num_buy_skus
     )
 
     train_dataset_dir = os.path.join(args.data_dir, "train")

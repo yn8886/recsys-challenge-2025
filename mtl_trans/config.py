@@ -10,12 +10,16 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Config:
     # 模型架构参数
-    ns_len: int = 5
-    hidden_dim: int = 510
-    num_heads: int = 1
+    ns_len: int = 6
+    hidden_dim: int = 512
+    num_heads: int = 4
     num_layers: int = 2
-    dropout: int = 0.2
+    dropout: float = 0.2
+    final_l_s: int = 2
+    churn_loss_weight: float = 0.3
+    buy_weight: float = 0.35
     pooling_strategy: str = "max"
+
 
     # 特征维度
     num_event = 5 + 1
@@ -51,7 +55,6 @@ class Config:
     expert_output_dim = 128
     task_tower_hidden_dims = [128]
     task_tower_dropout = 0.1
-    churn_loss_weight = 0.025
     dcn_cross_layers = 3
     dcn_hidden_units = [1024, 512]
     mlp_hidden_units = [512]

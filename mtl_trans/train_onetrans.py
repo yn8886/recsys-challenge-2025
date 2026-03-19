@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 import logging
 import lightning as L
+import torch.nn.functional as F
 import numpy as np
 import polars as pl
 import torch
@@ -18,6 +19,7 @@ from layers.ple import PLE
 from data_collator import RecsysDatasetV12
 from embed import SkuEmbedding, WordEmbedding, UrlEmbedding, QueryEmbedding, PositionalEncoding
 from layers.onetrans import OneTransModel
+
 
 NUM_CANDIDATES_SKU = 100
 NUM_CANDIDATES_CAT = 100
@@ -38,8 +40,6 @@ class EventType(Enum):
     SEARCH_QUERY = 5
 
 
-
-
 class BehaviorSequenceTransformer(nn.Module):
     def __init__(
         self,
@@ -57,16 +57,16 @@ class BehaviorSequenceTransformer(nn.Module):
         super().__init__()
 
         self.model = OneTransModel(
-            num_layers=num_layers,
-            final_seq_len=final_seq_len,
             d_model=d_model,
             num_heads=num_heads,
-            ns_len=ns_len,
-            seq_len=seq_len,
-            ns_input_dim=ns_input_dim,
+            num_layers=num_layers,
+            L_ns=ns_len,
+            initial_L_s=seq_len,
+            final_L_s=final_seq_len,
+            ns_raw_dim=ns_input_dim,
             last_embed_dim=last_embed_dim,
             mlp_hidden_units=mlp_hidden_units,
-            dropout=dropout,
+            dropout=dropout
         )
 
     def forward(self, seq_emb, statistical_features, s_padding_mask):
@@ -137,9 +137,14 @@ class LightningRecsysModel(L.LightningModule):
             padding_idx=cfg.padding_idx,
         )
 
+        self.time_fusion_layer = nn.Linear(
+            cfg.hidden_dim + cfg.day_emb_dim + cfg.week_emb_dim,
+            cfg.hidden_dim
+        )
+
         self.model = BehaviorSequenceTransformer(
             num_layers=cfg.num_layers,
-            final_seq_len=cfg.ns_len + 2,
+            final_seq_len=cfg.final_l_s,
             d_model=cfg.hidden_dim,
             num_heads=cfg.num_heads,
             ns_len=cfg.ns_len,
@@ -151,7 +156,7 @@ class LightningRecsysModel(L.LightningModule):
         )
 
         self.ple = PLE(
-            user_emb_dim=cfg.fusion_mlp_output_dim,
+            user_emb_dim=cfg.last_embed_dim,
             num_shared_experts=cfg.num_shared_experts,
             num_task_experts=cfg.num_task_experts,
             num_tasks=cfg.num_tasks,
@@ -159,6 +164,10 @@ class LightningRecsysModel(L.LightningModule):
             expert_output_dim=cfg.expert_output_dim,
             task_tower_hidden_dims=cfg.task_tower_hidden_dims,
         )
+
+        self.churn_head = nn.Linear(cfg.last_embed_dim, 1)
+        self.buy_category_head = nn.Linear(cfg.last_embed_dim, 100)
+        self.buy_sku_head = nn.Linear(cfg.last_embed_dim, 100)
 
         self.lr = cfg.learning_rate
 
@@ -233,9 +242,16 @@ class LightningRecsysModel(L.LightningModule):
         diff_weeks,
         feature_list,
     ):
+
         seq_feat_emb = self._aggregate_embeddings(
             event_type, sku_id, url_id, query_ids, cat_id, price_id, name_ids
         )
+        day_emb = self.day_emb_layer(diff_days)  # (B, S, day_emb_dim)
+        week_emb = self.week_emb_layer(diff_weeks)  # (B, S, week_emb_dim)
+
+        fused_embeddings = torch.cat([seq_feat_emb, day_emb, week_emb], dim=-1)
+        seq_feat_emb = self.time_fusion_layer(fused_embeddings)
+
         src_padding_mask = (event_type != 0).float()
         statistical_features = torch.cat(feature_list, dim=-1)
         user_emb = self.model(seq_feat_emb, statistical_features, src_padding_mask)
@@ -282,50 +298,116 @@ class LightningRecsysModel(L.LightningModule):
             [group_lifecycle, group_recency, group_purchase, group_cart_intent, group_exploration],
         )
 
-        (
-            logits_churn,
-            logits_buy_sku,
-            logits_buy_cat,
-        ) = self.calc_logits(user_emb)
+        # (
+        #     logits_churn,
+        #     logits_buy_sku,
+        #     logits_buy_cat,
+        # ) = self.calc_logits(user_emb)
 
         # Logging user embedding statistics
-        zero_ratio = (user_emb == 0).float().mean()
-
-        self.log("train/user_embedding/mean", user_emb.mean())
-        self.log("train/user_embedding/std", user_emb.std())
-        self.log("train/user_embedding/zero_ratio", zero_ratio)
-
-        logits_churn = logits_churn.squeeze(-1)
-        loss_churn = self.bce_loss(logits_churn, label_churn.float())
-        loss_churn = loss_churn * self.cfg.churn_loss_weight
+        # zero_ratio = (user_emb == 0).float().mean()
+        #
+        # self.log("train/user_embedding/mean", user_emb.mean())
+        # self.log("train/user_embedding/std", user_emb.std())
+        # self.log("train/user_embedding/zero_ratio", zero_ratio)
+        #
+        # logits_churn = logits_churn.squeeze(-1)
+        # loss_churn = self.bce_loss(logits_churn, label_churn.float())
+        # loss_churn = loss_churn * self.cfg.churn_loss_weight
 
         # Auxiliary Task
         # calculate loss for 100 types of sku/cat/price for buy
+        # is_contain_buy_sku = (torch.sum(label_buy_sku, dim=1) > 0).long()
+        # loss_buy_sku = torch.tensor(0.0, device=self.device)
+        # if torch.sum(is_contain_buy_sku) > 0:
+        #     mask = is_contain_buy_sku == 1
+        #     loss_buy_sku = self.bce_loss(
+        #         logits_buy_sku[mask], label_buy_sku[mask].float()
+        #     ) * self.cfg.buy_weight
+        #
+        # is_contain_buy_cat = (torch.sum(label_buy_cat, dim=1) > 0).long()
+        # loss_buy_cat = torch.tensor(0.0, device=self.device)
+        # if torch.sum(is_contain_buy_cat) > 0:
+        #     mask = is_contain_buy_cat == 1
+        #     loss_buy_cat = self.bce_loss(
+        #         logits_buy_cat[mask], label_buy_cat[mask].float()
+        #     ) * self.cfg.buy_weight
+        #
+        # self.log("train/loss_churn", loss_churn, prog_bar=True)
+        # self.log("train/loss_buy_sku", loss_buy_sku, prog_bar=True)
+        # self.log("train/loss_buy_cat", loss_buy_cat, prog_bar=True)
+        #
+        # sum_loss = (
+        #     loss_churn
+        #     + loss_buy_sku
+        #     + loss_buy_cat
+        # )
+        #
+        # emb_detached = user_emb.detach()
+        # logits_churn = self.churn_head(emb_detached).squeeze(dim=1)
+        # logits_buy_category = self.buy_category_head(emb_detached)
+        # logits_buy_sku = self.buy_sku_head(emb_detached)
+        #
+        # def _get_bce_loss(
+        #         logits: torch.Tensor,
+        #         target: torch.Tensor,
+        # ) -> torch.Tensor:
+        #     assert logits.ndim == target.ndim
+        #     assert logits.ndim <= 2
+        #     _loss = F.binary_cross_entropy_with_logits(logits, target.to(dtype=torch.float32), reduction="none")
+        #     if logits.ndim == 2:
+        #         _loss = _loss.mean(dim=1)
+        #     _loss = _loss.mean()
+        #     return _loss
+        #
+        # sum_loss += _get_bce_loss(logits_churn, label_churn)
+        # sum_loss += _get_bce_loss(logits_buy_category, label_buy_cat)
+        # sum_loss += _get_bce_loss(logits_buy_sku, label_buy_sku)
+        #
+        # self.log("train/sum_loss", sum_loss)
+        # return sum_loss
+
+        (logits_churn_ple, logits_buy_sku_ple, logits_buy_cat_ple) = self.calc_logits(user_emb)
+
+        loss_churn_ple = self.bce_loss(logits_churn_ple.squeeze(-1), label_churn.float()) * self.cfg.churn_loss_weight
+
         is_contain_buy_sku = (torch.sum(label_buy_sku, dim=1) > 0).long()
-        loss_buy_sku = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_buy_sku) > 0:
-            mask = is_contain_buy_sku == 1
-            loss_buy_sku = self.bce_loss(
-                logits_buy_sku[mask], label_buy_sku[mask].float()
-            )
+        mask_sku = is_contain_buy_sku == 1
 
         is_contain_buy_cat = (torch.sum(label_buy_cat, dim=1) > 0).long()
-        loss_buy_cat = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_buy_cat) > 0:
-            mask = is_contain_buy_cat == 1
-            loss_buy_cat = self.bce_loss(
-                logits_buy_cat[mask], label_buy_cat[mask].float()
-            )
+        mask_cat = is_contain_buy_cat == 1
 
-        self.log("train/loss_churn", loss_churn)
-        self.log("train/loss_buy_sku", loss_buy_sku)
-        self.log("train/loss_buy_cat", loss_buy_cat)
+        loss_buy_sku_ple = torch.tensor(0.0, device=self.device)
+        if mask_sku.any():
+            loss_buy_sku_ple = self.bce_loss(logits_buy_sku_ple[mask_sku],
+                                             label_buy_sku[mask_sku].float()) * self.cfg.buy_weight
 
-        sum_loss = (
-            loss_churn
-            + loss_buy_sku
-            + loss_buy_cat
-        )
+        loss_buy_cat_ple = torch.tensor(0.0, device=self.device)
+        if mask_cat.any():
+            loss_buy_cat_ple = self.bce_loss(logits_buy_cat_ple[mask_cat],
+                                             label_buy_cat[mask_cat].float()) * self.cfg.buy_weight
+
+        sum_loss = loss_churn_ple + loss_buy_sku_ple + loss_buy_cat_ple
+
+        emb_detached = user_emb.detach()
+
+        logits_churn_head = self.churn_head(emb_detached).squeeze(dim=1)
+        logits_buy_category_head = self.buy_category_head(emb_detached)
+        logits_buy_sku_head = self.buy_sku_head(emb_detached)
+
+        loss_churn_head = F.binary_cross_entropy_with_logits(logits_churn_head, label_churn.float())
+
+        loss_sku_head = torch.tensor(0.0, device=self.device)
+        if mask_sku.any():
+            loss_sku_head = F.binary_cross_entropy_with_logits(logits_buy_sku_head[mask_sku],
+                                                               label_buy_sku[mask_sku].float())
+
+        loss_cat_head = torch.tensor(0.0, device=self.device)
+        if mask_cat.any():
+            loss_cat_head = F.binary_cross_entropy_with_logits(logits_buy_category_head[mask_cat],
+                                                               label_buy_cat[mask_cat].float())
+
+        sum_loss += (loss_churn_head + loss_sku_head + loss_cat_head)
 
         self.log("train/sum_loss", sum_loss)
         return sum_loss
@@ -373,65 +455,67 @@ class LightningRecsysModel(L.LightningModule):
             logits_buy_cat,
         ) = self.calc_logits(user_emb)
 
-        zero_ratio = (user_emb == 0).float().mean()
+        # zero_ratio = (user_emb == 0).float().mean()
+        # self.log("valid/user_embedding/mean", user_emb.mean())
+        # self.log("valid/user_embedding/std", user_emb.std())
+        # self.log("valid/user_embedding/zero_ratio", zero_ratio)
 
-        self.log("valid/user_embedding/mean", user_emb.mean())
-        self.log("valid/user_embedding/std", user_emb.std())
-        self.log("valid/user_embedding/zero_ratio", zero_ratio)
+        is_contain_buy_sku = (torch.sum(label_buy_sku, dim=1) > 0).long()
+        mask_sku = is_contain_buy_sku == 1
+
+        is_contain_buy_cat = (torch.sum(label_buy_cat, dim=1) > 0).long()
+        mask_cat = is_contain_buy_cat == 1
 
         logits_churn = logits_churn.squeeze(-1)
         loss_churn = self.bce_loss(logits_churn, label_churn.float())
         loss_churn = loss_churn * self.cfg.churn_loss_weight
 
         # Auxiliary Task
-        is_contain_buy_sku = (torch.sum(label_buy_sku, dim=1) > 0).long()
         loss_buy_sku = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_buy_sku) > 0:
-            mask = is_contain_buy_sku == 1
-            loss_buy_sku = self.bce_loss(
-                logits_buy_sku[mask], label_buy_sku[mask].float()
-            )
+        if mask_sku.any():
+            loss_buy_sku = self.bce_loss(logits_buy_sku[mask_sku], label_buy_sku[mask_sku].float())
 
-        is_contain_buy_cat = (torch.sum(label_buy_cat, dim=1) > 0).long()
         loss_buy_cat = torch.tensor(0.0, device=self.device)
-        if torch.sum(is_contain_buy_cat) > 0:
-            mask = is_contain_buy_cat == 1
-            loss_buy_cat = self.bce_loss(
-                logits_buy_cat[mask], label_buy_cat[mask].float()
-            )
+        if mask_cat.any():
+            loss_buy_cat = self.bce_loss(logits_buy_cat[mask_cat], label_buy_cat[mask_cat].float())
 
-        self.log('valid/loss_churn', loss_churn)
+        self.log("valid/loss_churn", loss_churn, logger=True, on_step=False, on_epoch=True)
+        self.log("valid/loss_cat", loss_buy_cat, logger=True, on_step=False, on_epoch=True)
+        self.log("valid/loss_sku", loss_buy_sku, logger=True, on_step=False, on_epoch=True)
 
-        sum_loss = (
-            loss_churn
-            + loss_buy_sku
-            + loss_buy_cat
-        )
 
-        self.log("valid/sum_loss", sum_loss)
+        emb_detached = user_emb
+        logits_churn2 = self.churn_head(emb_detached).squeeze(dim=1)
+        logits_buy_category2 = self.buy_category_head(emb_detached)
+        logits_buy_sku2 = self.buy_sku_head(emb_detached)
 
-        val_metrics = {}
-        val_metrics['churn_loss'] = loss_churn.item()
-        val_metrics['cat_loss'] = loss_buy_cat.item()
-        val_metrics['sku_loss'] = loss_buy_sku.item()
-        val_metrics['sum_loss'] = sum_loss.item()
-        # logger.info(f"Validation metrics: {val_metrics}")
+        def _get_bce_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+            _loss = F.binary_cross_entropy_with_logits(logits, target.to(dtype=torch.float32), reduction="none")
+            if logits.ndim == 2:
+                _loss = _loss.mean(dim=1)
+            return _loss.mean()
 
-        # Update AUROC metrics
-        self.valid_auroc_churn.update(logits_churn, label_churn)
+        loss_churn2 = _get_bce_loss(logits_churn2, label_churn)
+        loss_buy_cat2 = _get_bce_loss(logits_buy_category2, label_buy_cat)
+        loss_buy_sku2 = _get_bce_loss(logits_buy_sku2, label_buy_sku)
 
-        is_contain_buy_sku = (torch.sum(label_buy_sku, dim=1) > 0).long()
-        if torch.sum(is_contain_buy_sku) > 0:
-            mask = is_contain_buy_sku == 1
-            self.valid_auroc_buy_sku.update(
-                logits_buy_sku[mask], label_buy_sku[mask].int()
-            )
+        self.log("valid/loss_churn2", loss_churn2, logger=True, on_step=False, on_epoch=True)
+        self.log("valid/loss_cat2", loss_buy_cat2, logger=True, on_step=False, on_epoch=True)
+        self.log("valid/loss_sku2", loss_buy_sku2, logger=True, on_step=False, on_epoch=True)
 
-        is_contain_buy_cat = (torch.sum(label_buy_cat, dim=1) > 0).long()
-        if torch.sum(is_contain_buy_cat) > 0:
-            mask = is_contain_buy_cat == 1
+
+        self.valid_auroc_churn.update(logits_churn2, label_churn.to(dtype=torch.uint8))
+
+        if mask_cat.any():
             self.valid_auroc_buy_cat.update(
-                logits_buy_cat[mask], label_buy_cat[mask].int()
+                logits_buy_category2[mask_cat],
+                label_buy_cat[mask_cat].int(),
+            )
+
+        if mask_sku.any():
+            self.valid_auroc_buy_sku.update(
+                logits_buy_sku2[mask_sku],
+                label_buy_sku[mask_sku].int()
             )
 
 
@@ -490,12 +574,22 @@ def main():
     parser.add_argument(
         "--num-layers",
         type=int,
-        default=8,
+        default=6,
     )
     parser.add_argument(
         "--ns-len",
         type=int,
         default=5,
+    )
+    parser.add_argument(
+        "--final-l-s",
+        type=int,
+        default=2,
+    )
+    parser.add_argument(
+        "--hidden-dim",
+        type=int,
+        default=256,
     )
     parser.add_argument(
         "--num-workers",
@@ -521,6 +615,19 @@ def main():
         default=1e-4,
         help="Learning rate",
     )
+    parser.add_argument(
+        "--churn-loss-weight",
+        type=float,
+        default=0.3,
+        help="Learning rate",
+    )
+    parser.add_argument(
+        "--buy-weight",
+        type=float,
+        default=0.35,
+        help="Learning rate",
+    )
+
     args = parser.parse_args()
     device = f"cuda:{args.devices}" if args.accelerator == "cuda" else "cpu"
     config = Config(
@@ -532,7 +639,10 @@ def main():
         ns_len=args.ns_len,
         num_layers=args.num_layers,
         num_workers=args.num_workers,
+        hidden_dim=args.hidden_dim,
         devices=[int(args.devices)] if args.accelerator == "cuda" else [],
+        churn_loss_weight=args.churn_loss_weight,
+        buy_weight=args.buy_weight,
     )
 
     train_dataset_dir = os.path.join(args.data_dir, "train")
@@ -581,6 +691,7 @@ def main():
         accelerator=args.accelerator,
         max_epochs=config.num_epochs,
         num_sanity_val_steps=0,
+        log_every_n_steps=50
     )
     trainer.fit(
         model,

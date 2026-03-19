@@ -259,28 +259,15 @@ class LightningRecsysModel(L.LightningModule):
 
         self.save_hyperparameters()
 
-        assert self.model.last_embed_dim == self.model_target.last_embed_dim
         self.train_acc = torchmetrics.Accuracy(task="multiclass", num_classes=cfg.batch_size)
 
         # auxiliary task for embedding model
         self.empty_head = nn.Linear(self.model.last_embed_dim, 1, bias=True)
-        self.train_empty_auc = torchmetrics.AUROC(task="binary")
 
         # linear probe to evaluate embedding
         self.churn_head = nn.Linear(self.model.last_embed_dim, 1)
         self.buy_category_head = nn.Linear(self.model.last_embed_dim, cfg.num_buy_categories)
         self.buy_sku_head = nn.Linear(self.model.last_embed_dim, cfg.num_buy_skus)
-        self.train_churn_auc = torchmetrics.AUROC(task="binary")
-        self.train_buy_category_auc = torchmetrics.AUROC(
-            task="multilabel",
-            num_labels=cfg.num_buy_categories,
-            average="macro",
-        )
-        self.train_buy_sku_auc = torchmetrics.AUROC(
-            task="multilabel",
-            num_labels=cfg.num_buy_skus,
-            average="macro",
-        )
 
         self.valid_empty_auc = torchmetrics.AUROC(task="binary")
         self.valid_churn_auc = torchmetrics.AUROC(task="binary")
@@ -401,7 +388,6 @@ class LightningRecsysModel(L.LightningModule):
         # auxiliary task: emptry prediction
         logits_empty = self.empty_head(outputs1.pooled_output).squeeze(dim=1)
         loss += _get_bce_loss(logits_empty, labels_empty)
-        self.train_empty_auc.update(logits_empty.detach(), labels_empty.to(dtype=torch.uint8))
 
         # linear probe
         # detach to prevent gradient flow to embedding model
@@ -412,32 +398,8 @@ class LightningRecsysModel(L.LightningModule):
         loss += _get_bce_loss(logits_churn, labels["churn"])
         loss += _get_bce_loss(logits_buy_category, labels["buy_category"])
         loss += _get_bce_loss(logits_buy_sku, labels["buy_sku"])
-        # evaluate only on relevant examples
-        self.train_churn_auc.update(
-            logits_churn.detach(),
-            labels["churn"].to(dtype=torch.uint8),
-        )
-        self.train_buy_category_auc.update(
-            logits_buy_category.detach(),
-            labels["buy_category"].to(dtype=torch.uint8),
-        )
-        self.train_buy_sku_auc.update(
-            logits_buy_sku.detach(),
-            labels["buy_sku"].to(dtype=torch.uint8),
-        )
 
         return loss
-
-    def on_train_epoch_end(self) -> None:
-        self.log("train/empty_auc", self.train_empty_auc.compute(), prog_bar=False, logger=True)
-        self.log("train/churn_auc", self.train_churn_auc.compute(), prog_bar=False, logger=True)
-        self.log("train/buy_category_auc", self.train_buy_category_auc.compute(), prog_bar=False, logger=True)
-        self.log("train/buy_sku_auc", self.train_buy_sku_auc.compute(), prog_bar=False, logger=True)
-        self.train_empty_auc.reset()
-        self.train_churn_auc.reset()
-        self.train_buy_category_auc.reset()
-        self.train_buy_sku_auc.reset()
-        self._set_state_radam_schedule_free(is_train=False)
 
     def validation_step(self, batch, batch_idx):
         input_features, target_features, labels = batch
@@ -521,11 +483,11 @@ class LightningRecsysModel(L.LightningModule):
         )
         self.valid_buy_category_auc.update(
             logits_buy_category,
-            labels["buy_category"].to(dtype=torch.uint8)
+            labels["buy_category"].int()
         )
         self.valid_buy_sku_auc.update(
             logits_buy_sku,
-            labels["buy_sku"].to(dtype=torch.uint8)
+            labels["buy_sku"].int()
         )
 
         return loss
@@ -609,7 +571,17 @@ def main():
     parser.add_argument(
         "--num-layers",
         type=int,
-        default=8,
+        default=2,
+    )
+    parser.add_argument(
+        "--num-buy-categories",
+        type=int,
+        default=16,
+    )
+    parser.add_argument(
+        "--num-buy-skus",
+        type=int,
+        default=3,
     )
     parser.add_argument(
         "--max-len",
@@ -643,6 +615,8 @@ def main():
         device=device,
         num_workers=args.num_workers,
         devices=[int(args.devices)] if args.accelerator == "cuda" else [],
+        num_buy_categories=args.num_buy_categories,
+        num_buy_skus=args.num_buy_skus
     )
 
     train_dataset_dir = os.path.join(args.data_dir, "train")

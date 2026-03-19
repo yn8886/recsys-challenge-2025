@@ -323,7 +323,6 @@ class LightningRecsysModel(L.LightningModule):
 
         self.save_hyperparameters()
 
-        assert self.model.last_embed_dim == self.model_target.last_embed_dim
         self.train_acc = torchmetrics.Accuracy(task="multiclass", num_classes=cfg.batch_size)
 
         # auxiliary task for embedding model
@@ -569,26 +568,38 @@ class LightningRecsysModel(L.LightningModule):
         # if boolean_indices.any():
         #     self.valid_acc.update(sim[boolean_indices].detach().cpu(), sim_labels[boolean_indices].cpu())
 
+        # self.valid_churn_auc.update(
+        #     logits_churn,
+        #     labels["churn"].to(dtype=torch.uint8)
+        # )
+        #
+        # is_contain_buy_sku = (torch.sum(labels["buy_sku"], dim=1) > 0).long()
+        # if torch.sum(is_contain_buy_sku) > 0:
+        #     mask = is_contain_buy_sku == 1
+        #     self.valid_buy_sku_auc.update(
+        #         logits_buy_sku[mask], labels["buy_sku"][mask].int()
+        #     )
+        #
+        # is_contain_buy_cat = (torch.sum(labels["buy_category"], dim=1) > 0).long()
+        # if torch.sum(is_contain_buy_cat) > 0:
+        #     mask = is_contain_buy_cat == 1
+        #     self.valid_buy_category_auc.update(
+        #         logits_buy_category[mask], labels["buy_category"][mask].int()
+        #     )
+
         self.valid_churn_auc.update(
             logits_churn,
-            labels["churn"].to(dtype=torch.uint8)
+            labels["churn"].to(dtype=torch.uint8),
+        )
+        self.valid_buy_category_auc.update(
+            logits_buy_category,
+            labels["buy_category"].int(),
+        )
+        self.valid_buy_sku_auc.update(
+            logits_buy_sku,
+            labels["buy_sku"].int()
         )
 
-        is_contain_buy_sku = (torch.sum(labels["buy_sku"], dim=1) > 0).long()
-        if torch.sum(is_contain_buy_sku) > 0:
-            mask = is_contain_buy_sku == 1
-            self.valid_buy_sku_auc.update(
-                logits_buy_sku[mask], labels["buy_sku"][mask].int()
-            )
-
-        is_contain_buy_cat = (torch.sum(labels["buy_category"], dim=1) > 0).long()
-        if torch.sum(is_contain_buy_cat) > 0:
-            mask = is_contain_buy_cat == 1
-            self.valid_buy_category_auc.update(
-                logits_buy_category[mask], labels["buy_category"][mask].int()
-            )
-
-        return loss
 
 
     def on_validation_epoch_end(self):
@@ -679,7 +690,17 @@ def main():
     parser.add_argument(
         "--num-layers",
         type=int,
-        default=8,
+        default=2,
+    )
+    parser.add_argument(
+        "--num-buy-categories",
+        type=int,
+        default=16,
+    )
+    parser.add_argument(
+        "--num-buy-skus",
+        type=int,
+        default=3,
     )
     parser.add_argument(
         "--pooling-strategy",
@@ -709,7 +730,9 @@ def main():
         num_workers=args.num_workers,
         devices=[int(args.devices)] if args.accelerator == "cuda" else [],
         pooling_strategy=args.pooling_strategy,
-        hidden_dim=args.hidden_dim
+        hidden_dim=args.hidden_dim,
+        num_buy_categories=args.num_buy_categories,
+        num_buy_skus=args.num_buy_skus,
     )
 
     train_dataset_dir = os.path.join(args.data_dir, "train")
